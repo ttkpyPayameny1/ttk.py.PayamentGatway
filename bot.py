@@ -3,7 +3,7 @@ import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 # আপনার বটের টেলিগ্রাম টোকেন এখানে বসান
-TOKEN = 'YOUR_BOT_TOKEN_HERE'
+TOKEN = '8631873007:AAEVtP7swVa82bIl8Mr_seyzi1MdFwQzvM4'
 bot = telebot.TeleBot(TOKEN)
 
 # ডাটাবেস ইনিশিয়ালাইজেশন
