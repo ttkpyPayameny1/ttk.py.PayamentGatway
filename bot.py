@@ -1,6 +1,5 @@
-# NIKAN EARN - Reply Keyboard Demo Bot
+# NIKAN EARN - Reply Keyboard Demo Bot (Fixed Version)
 # Python 3.10+ / aiogram 3.x
-# DEMO/SIMULATION ONLY — no real payment gateway or payout is performed.
 
 import asyncio
 import re
@@ -49,7 +48,6 @@ PROCESSED_CALLBACKS = {}
 
 def callback_once(key: str, ttl: int = 5) -> bool:
     now = datetime.now().timestamp()
-    # Clean old entries
     for k in list(PROCESSED_CALLBACKS.keys()):
         if now - PROCESSED_CALLBACKS[k] > ttl:
             del PROCESSED_CALLBACKS[k]
@@ -223,7 +221,6 @@ def main_keyboard():
             [KeyboardButton(text="🆘 Help & Support"), KeyboardButton(text="🔧 Admin Panel")],
         ],
         resize_keyboard=True,
-        is_persistent=True,
         input_field_placeholder="একটি অপশন নির্বাচন করুন"
     )
 
@@ -325,37 +322,6 @@ async def dep_local_method(call: CallbackQuery, state: FSMContext):
     )
     await call.answer()
 
-@dp.message(DepositState.amount)
-async def dep_local_amount(message: Message, state: FSMContext):
-    data = await state.get_data()
-    method = data.get("method")
-    
-    if method == "Binance":
-        await dep_binance_amount(message, state)
-        return
-
-    try:
-        amount = Decimal(message.text.strip())
-    except (InvalidOperation, AttributeError):
-        await message.answer("❌ সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।")
-        return
-
-    if amount < 50 or amount > 10000:
-        await message.answer("⚠️ ডিপোজিটের পরিমাণ 50৳ থেকে 10,000৳ এর মধ্যে হতে হবে।")
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=PAYMENT_GATEWAY_URL)],
-        [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
-    ])
-    await message.answer(
-        f"💰 ডিপোজিট এমাউন্ট: {money(amount)}৳\n\n"
-        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন。\n\n"
-        f"💳 Method: {method}",
-        reply_markup=kb
-    )
-    await state.clear()
-
 @dp.callback_query(F.data == "dep_binance")
 async def dep_binance(call: CallbackQuery, state: FSMContext):
     if not callback_once(f"dep_binance:{call.from_user.id}"):
@@ -371,6 +337,42 @@ async def dep_binance(call: CallbackQuery, state: FSMContext):
         reply_markup=cancel_keyboard()
     )
     await call.answer()
+
+@dp.message(DepositState.amount)
+async def dep_amount_router(message: Message, state: FSMContext):
+    data = await state.get_data()
+    method = data.get("method")
+    
+    if method == "Binance":
+        await dep_binance_amount(message, state)
+    else:
+        await dep_local_amount(message, state)
+
+async def dep_local_amount(message: Message, state: FSMContext):
+    try:
+        amount = Decimal(message.text.strip())
+    except (InvalidOperation, AttributeError):
+        await message.answer("❌ সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।")
+        return
+
+    if amount < 50 or amount > 10000:
+        await message.answer("⚠️ ডিপোজিটের পরিমাণ 50৳ থেকে 10,000৳ এর মধ্যে হতে হবে।")
+        return
+
+    data = await state.get_data()
+    method = data.get("method")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=PAYMENT_GATEWAY_URL)],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
+    ])
+    await message.answer(
+        f"💰 ডিপোজিট এমাউন্ট: {money(amount)}৳\n\n"
+        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন。\n\n"
+        f"💳 Method: {method}",
+        reply_markup=kb
+    )
+    await state.clear()
 
 async def dep_binance_amount(message: Message, state: FSMContext):
     try:
@@ -531,7 +533,7 @@ async def wd_method(call: CallbackQuery, state: FSMContext):
     await state.set_state(WithdrawState.account)
     await call.message.answer(
         f"📲 {method}\n\n"
-        "আপনার সঠিক ১১ ডিজিটের নম্বরটি লিখুন।\n"
+        "আপনার সঠিক ১১ ডিজিটের নম্বরটি লিখুন。\n"
         "উদাহরণ: 017XXXXXXXX",
         reply_markup=cancel_keyboard()
     )
@@ -910,7 +912,7 @@ async def plan_details(call: CallbackQuery):
     plan = call.data.split(":", 1)[1]
     amount = PLANS.get(plan)
     if amount is None:
-        await call.answer("Plan পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Plan পাওয়া যায়নি។", show_alert=True)
         return
 
     daily = Decimal(str(amount)) * DEMO_DAILY_RATE
@@ -1259,7 +1261,7 @@ async def admin_wd_approve(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_wd_no:"))
 async def admin_wd_reject(call: CallbackQuery):
-    if not callback_once(f"admin_wd_reject:{call.from_user.id}:{call.data}", ttl=10):
+    if not callback_once(f"adm_wd_reject:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
     if call.from_user.id != ADMIN_ID:
         await call.answer("Unauthorized", show_alert=True)
@@ -2017,7 +2019,7 @@ async def x_do_addadmin(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "x:rmadmin")
 async def x_rmadmin(call: CallbackQuery, state: FSMContext):
     if not super_ok(call.from_user.id):
-        return await call.answer("Owner only", show_alert=True)
+        return await call.answer("Owner only", show_io_alert=True) if hasattr(call, 'answer') else None
     await state.set_state(AdvancedAdminState.remove_admin)
     await call.message.answer("➖ Remove করতে চাওয়া Admin-এর User Telegram ID পাঠান।")
     await call.answer()
@@ -2046,7 +2048,6 @@ async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Set Bot Commands Menu (Basic Commands)
     commands = [
         BotCommand(command="start", description="🚀 Start Bot — বট শুরু করুন"),
         BotCommand(command="menu", description="🏠 Main Menu — প্রধান মেনু"),
