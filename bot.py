@@ -3,8 +3,13 @@
 # DEMO/SIMULATION ONLY — no real payment gateway or payout is performed.
 
 import asyncio
+import errno
+import logging
+import os
 import re
 import sqlite3
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -12,7 +17,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -44,6 +49,45 @@ DEMO_DAILY_RATE = Decimal("0.34")
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
+
+
+# =========================
+# ✅ FIX: SINGLE-INSTANCE LOCK
+# =========================
+# একই মেশিনে bot একাধিকবার চালু থাকলে Telegram থেকে একই মেসেজ
+# একাধিকবার প্রসেস হয়ে user ১-৩ বার রিপ্লাই পায়।
+# এই lock দ্বিতীয় instance চালু হওয়ার সাথে সাথে সেটি বন্ধ করে দেয়।
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nikan_bot.lock")
+_lock_handle = None
+
+
+def acquire_single_instance_lock():
+    global _lock_handle
+    try:
+        import fcntl  # Linux / macOS
+    except ImportError:
+        return  # Windows: এই check skip হবে
+    try:
+        handle = open(LOCK_FILE, "a+")
+    except OSError:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        handle.close()
+        if getattr(e, "errno", None) in (errno.EAGAIN, errno.EACCES):
+            print("=" * 62)
+            print("❌ NIKAN EARN bot ইতিমধ্যেই অন্য একটি instance-এ চলছে!")
+            print("👉 আগের bot / terminal / panel বন্ধ করে আবার চালান।")
+            print("   (একসাথে ২+ instance চললে user ১-৩ বার রিপ্লাই পায়)")
+            print("=" * 62)
+            sys.exit(1)
+        return
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _lock_handle = handle
 
 
 # =========================
@@ -272,7 +316,7 @@ async def help_command(message: Message):
 @dp.message(F.text == "❌ Cancel")
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ **বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।**", parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
+    await message.answer("❌ **বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।**", parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
 
 
 # =========================
@@ -304,7 +348,7 @@ async def dep_local_method(call: CallbackQuery, state: FSMContext):
         "📊 **ডিপোজিট লিমিট:** 0/3\n"
         "💰 **সর্বনিম্ন:** 50৳\n"
         "💰 **সর্বোচ্চ:** 10,000৳\n\n"
-        "👉 **কত টাকা ডিপোজিট করতে চান? সংখ্যায় লিখুন।**",
+        "👉 **কত টাকা ডিপোজিট করতে চান? সংখ্যায় লিখুন।**",
         parse_mode="Markdown",
         reply_markup=cancel_keyboard()
     )
@@ -320,7 +364,7 @@ async def dep_local_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal(message.text.strip())
     except (InvalidOperation, AttributeError):
-        await message.answer("❌ **সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।**", parse_mode="Markdown")
+        await message.answer("❌ **সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।**", parse_mode="Markdown")
         return
 
     if amount < 50 or amount > 10000:
@@ -330,12 +374,12 @@ async def dep_local_amount(message: Message, state: FSMContext):
     method = data["method"]
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=PAYMENT_GATEWAY_URL)],
+        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=PAYMENT_GATEWAY_URL)],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
     ])
     await message.answer(
         f"💰 **ডিপোজিট এমাউন্ট:** {money(amount)}৳\n\n"
-        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।\n\n"
+        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।\n\n"
         f"💳 **Method:** {method}",
         parse_mode="Markdown",
         reply_markup=kb
@@ -379,7 +423,7 @@ async def dep_binance_amount(message: Message, state: FSMContext):
         f"💱 **ডিপোজিট রেট:** 1 USDT = {money(USDT_RATE_BDT)}৳\n"
         f"💰 **আপনার পরিমাণ:** {money(amount)} USDT\n"
         f"💵 **ব্যালেন্সে যোগ হবে:** {money(bdt)}৳\n\n"
-        "📌 **BEP20 / BSC নেটওয়ার্ক ব্যবহার করে নিচের ঠিকানায় USDT পাঠান:**\n\n"
+        "📌 **BEP20 / BSC নেটওয়ার্ক ব্যবহার করে নিচের ঠিকানায় USDT পাঠান:**\n\n"
         f"`{BINANCE_DEPOSIT_ADDRESS}`\n\n"
         "📝 **পেমেন্ট করার পর TxID / Transaction Hash পাঠান।**",
         parse_mode="Markdown",
@@ -392,8 +436,8 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     txid = message.text.strip()
     if not re.fullmatch(r"0x[a-fA-F0-9]{64}", txid):
         await message.answer(
-            "❌ **TxID সঠিক নয়।**\n"
-            "0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।",
+            "❌ **TxID সঠিক নয়।**\n"
+            "0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।",
             parse_mode="Markdown"
         )
         return
@@ -416,7 +460,7 @@ async def dep_binance_txid(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        "✅ **আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে।**\n"
+        "✅ **আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে।**\n"
         "⏳ **অনুমোদনের জন্য অপেক্ষা করুন।**",
         parse_mode="Markdown",
         reply_markup=main_keyboard(message.from_user.id)
@@ -454,7 +498,17 @@ async def send_admin_deposit(user, method, amount, txid, oid):
 @dp.message(F.text == "👤 একাউন্ট")
 async def account(message: Message):
     row = get_user(message)
-    uid, name, username, main, deposit, bonus, referral, total, created = row
+
+    # ✅ FIX: আগে এখানে ৯টি variable-এ unpack করা হচ্ছিল, কিন্তু users টেবিলে
+    # ১৪টি column থাকায় "too many values to unpack" error হয়ে
+    # একাউন্ট বাটন একদমই কাজ করত না। এখন index দিয়ে নিরাপদে পড়া হচ্ছে।
+    uid = row[0]
+    name = row[1]
+    username = row[2]
+    main = row[3]
+    deposit = row[4]
+    bonus = row[5]
+    referral = row[6]
 
     con = db()
     cur = con.cursor()
@@ -465,8 +519,8 @@ async def account(message: Message):
     active = cur.fetchall()
     con.close()
 
-    vip1 = "সক্রিয় নয়"
-    vip2 = "সক্রিয় নয়"
+    vip1 = "সক্রিয় নয়"
+    vip2 = "সক্রিয় নয়"
     now = datetime.now(timezone.utc)
 
     for plan, expires in active:
@@ -495,7 +549,7 @@ async def account(message: Message):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "👑 **ACCOUNT STATUS**\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⏳ **Plan এর মেয়াদ:**\n"
+        "⏳ **Plan এর মেয়াদ:**\n"
         f"• **VIP 1** — {vip1}\n"
         f"• **VIP 2** — {vip2}\n"
         "🚫 **নিষিদ্ধ:** না\n"
@@ -553,7 +607,7 @@ async def wd_account(message: Message, state: FSMContext):
         "• **সর্বনিম্ন:** 100৳\n"
         "• **সর্বোচ্চ:** 25,000৳\n\n"
         f"📲 **নম্বর:** {account_no}\n\n"
-        "👉 **কত টাকা উইথড্র করতে চান? সংখ্যায় লিখুন।**",
+        "👉 **কত টাকা উইথড্র করতে চান? সংখ্যায় লিখুন।**",
         parse_mode="Markdown",
         reply_markup=cancel_keyboard()
     )
@@ -594,7 +648,7 @@ async def wd_amount(message: Message, state: FSMContext):
     if cur.rowcount != 1:
         con.rollback()
         con.close()
-        await message.answer("❌ **ব্যালেন্স পরিবর্তিত হয়েছে। আবার চেষ্টা করুন.**", parse_mode="Markdown")
+        await message.answer("❌ **ব্যালেন্স পরিবর্তিত হয়েছে। আবার চেষ্টা করুন।**", parse_mode="Markdown")
         return
 
     cur.execute("""
@@ -666,7 +720,7 @@ async def referral(message: Message):
         f"🔗 **আপনার Referral Link:**\n`{link}`\n\n"
         "👥 **মোট referrals:** 0\n"
         f"💰 **Referral earnings:** {money(refbal)}৳\n\n"
-        "📌 **রেফার করা ব্যক্তি ডিপোজিট করলে, প্রযোজ্য শর্ত অনুযায়ী "
+        "📌 **রেফার করা ব্যক্তি ডিপোজিট করলে, প্রযোজ্য শর্ত অনুযায়ী "
         "তার ডিপোজিট থেকে ৫% কমিশন গণনা করা যেতে পারে।**",
         parse_mode="Markdown",
         reply_markup=kb
@@ -678,7 +732,7 @@ async def ref_rules(call: CallbackQuery):
     await call.message.answer(
         "📋 **Referral Rules**\n\n"
         "রেফার করা ব্যক্তি ডিপোজিট করলে তার ডিপোজিটের ৫% কমিশন "
-        "সিস্টেমের নির্ধারিত নিয়ম অনুযায়ী Referral Balance-এ যোগ হতে পারে।",
+        "সিস্টেমের নির্ধারিত নিয়ম অনুযায়ী Referral Balance-এ যোগ হতে পারে।",
         parse_mode="Markdown"
     )
     await call.answer()
@@ -720,7 +774,7 @@ async def daily_earnings(message: Message):
         valid.append((pid, plan, amount, daily, last_claim))
         lines.append(
             f"💎 **{plan}** — {money(amount)}৳\n"
-            f"📅 **মেয়াদ শেষ:** {exp.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"📅 **মেয়াদ শেষ:** {exp.strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"📊 **Demo daily amount:** {money(daily)}৳\n"
         )
 
@@ -800,18 +854,18 @@ async def claim_today(call: CallbackQuery):
     con.close()
 
     if total == 0:
-        await call.answer("⚠️ আজকের earnings ইতিমধ্যে করা হয়েছে বা available নেই।", show_alert=True)
+        await call.answer("⚠️ আজকের earnings ইতিমধ্যে করা হয়েছে বা available নেই।", show_alert=True)
         return
 
     await call.message.answer(
         "🎉 **Today Earnings Claim Successful**\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 **মোট যোগ হয়েছে:** {money(total)}৳\n"
+        f"💰 **মোট যোগ হয়েছে:** {money(total)}৳\n"
         f"📦 **Active plans claimed:** {len(claimed)}\n\n"
-        "ℹ️ এটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
+        "ℹ️ এটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
         parse_mode="Markdown"
     )
-    await call.answer("✅ Claim সম্পন্ন হয়েছে।")
+    await call.answer("✅ Claim সম্পন্ন হয়েছে।")
 
 
 # =========================
@@ -819,11 +873,13 @@ async def claim_today(call: CallbackQuery):
 # =========================
 @dp.message(F.text == "🎁 Bonus Center")
 async def bonus_center(message: Message):
+    get_user(message)  # ✅ FIX: /start না দিলেও user row তৈরি হবে (আগে crash হতো)
     uid = message.from_user.id
     con = db()
     cur = con.cursor()
     cur.execute("SELECT bonus_balance FROM users WHERE user_id=?", (uid,))
-    bal = cur.fetchone()[0]
+    row = cur.fetchone()
+    bal = row[0] if row else 0
     con.close()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -852,7 +908,7 @@ async def bonus_claim(call: CallbackQuery):
     """, (uid,))
     if cur.fetchone():
         con.close()
-        await call.answer("আজকের 5৳ Bonus ইতিমধ্যে নেওয়া হয়েছে।", show_alert=True)
+        await call.answer("আজকের 5৳ Bonus ইতিমধ্যে নেওয়া হয়েছে।", show_alert=True)
         return
 
     cur.execute("UPDATE users SET bonus_balance=bonus_balance+5 WHERE user_id=?", (uid,))
@@ -863,7 +919,7 @@ async def bonus_claim(call: CallbackQuery):
     con.commit()
     con.close()
 
-    await call.message.answer("🎁 **আজকের 5৳ Bonus আপনার Bonus Balance-এ যোগ হয়েছে।**", parse_mode="Markdown")
+    await call.message.answer("🎁 **আজকের 5৳ Bonus আপনার Bonus Balance-এ যোগ হয়েছে।**", parse_mode="Markdown")
     await call.answer("✅ Bonus claimed!")
 
 
@@ -879,7 +935,7 @@ async def bonus_history(call: CallbackQuery):
     con.close()
 
     if not rows:
-        text = "📜 **Bonus History**\n\nকোনো bonus history পাওয়া যায়নি।"
+        text = "📜 **Bonus History**\n\nকোনো bonus history পাওয়া যায়নি।"
     else:
         text = "📜 **Bonus History**\n━━━━━━━━━━━━━━━━━━\n"
         for amount, typ, created in rows:
@@ -910,9 +966,9 @@ async def available_plans(message: Message):
         "💎 **Available Plans**\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "নিচে একটি Plan নির্বাচন করুন।\n\n"
-        "📅 **মেয়াদ:** 4 দিন\n"
+        "📅 **মেয়াদ:** 4 দিন\n"
         "📊 **Daily calculation:** 34% (DEMO/SIMULATION)\n"
-        "⚠️ **কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
+        "⚠️ **কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
         parse_mode="Markdown",
         reply_markup=plan_keyboard()
     )
@@ -923,7 +979,7 @@ async def plan_details(call: CallbackQuery):
     plan = call.data.split(":", 1)[1]
     amount = PLANS.get(plan)
     if amount is None:
-        await call.answer("Plan পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Plan পাওয়া যায়নি।", show_alert=True)
         return
 
     daily = Decimal(str(amount)) * DEMO_DAILY_RATE
@@ -941,7 +997,7 @@ async def plan_details(call: CallbackQuery):
         f"📅 **Duration:** {PLAN_DAYS} days\n"
         f"📊 **Demo daily amount:** {money(daily)}৳\n"
         f"📈 **Demo total:** {money(total_demo)}৳\n\n"
-        "⚠️ **এটি শুধুমাত্র DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
+        "⚠️ **এটি শুধুমাত্র DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
         parse_mode="Markdown",
         reply_markup=kb
     )
@@ -976,9 +1032,9 @@ async def buy_plan(call: CallbackQuery):
         con.close()
         await call.message.answer(
             "⚠️ **Plan Limit Reached**\n"
-            f"দুঃখিত! আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌\n\n"
-            "📅 **এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত "
-            "একই Plan আর নতুন করে সক্রিয় করতে পারবেন না।**\n\n"
+            f"দুঃখিত! আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌\n\n"
+            "📅 **এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত "
+            "একই Plan আর নতুন করে সক্রিয় করতে পারবেন না।**\n\n"
             "💎 তবে অন্যান্য Available Plans থেকে Plan নির্বাচন করতে পারবেন।",
             parse_mode="Markdown"
         )
@@ -997,7 +1053,7 @@ async def buy_plan(call: CallbackQuery):
         con.close()
         await call.message.answer(
             "❌ **আপনার ডিপোজিট ও মেইন balance এ পর্যাপ্ত টাকা নেই।**\n"
-            "দয়া করে আগে যোগ করুন, পরে আবার চেষ্টা করুন। ধন্যবাদ। ❤️",
+            "দয়া করে আগে যোগ করুন, পরে আবার চেষ্টা করুন। ধন্যবাদ। ❤️",
             parse_mode="Markdown"
         )
         await call.answer()
@@ -1028,16 +1084,16 @@ async def buy_plan(call: CallbackQuery):
     daily = Decimal(str(amount)) * DEMO_DAILY_RATE
 
     await call.message.answer(
-        f"🎊 **অভিনন্দন! আপনার {plan} Plan সফলভাবে সক্রিয় হয়েছে।** ✅\n"
+        f"🎊 **অভিনন্দন! আপনার {plan} Plan সফলভাবে সক্রিয় হয়েছে।** ✅\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"💎 **Plan:** {plan}\n"
-        f"💰 **বিনিয়োগ:** ৳{amount}\n"
-        f"📅 **মেয়াদ:** {PLAN_DAYS} দিন\n"
-        f"📊 **Demo দৈনিক আয়:** ৳{money(daily)}\n\n"
+        f"💰 **বিনিয়োগ:** ৳{amount}\n"
+        f"📅 **মেয়াদ:** {PLAN_DAYS} দিন\n"
+        f"📊 **Demo দৈনিক আয়:** ৳{money(daily)}\n\n"
         "💵 Daily Earnings থেকে claim করতে পারবেন।\n"
-        "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে।\n\n"
+        "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে।\n\n"
         "⚠️ **Daily amount একটি DEMO/SIMULATION calculation; "
-        "কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
+        "কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
         parse_mode="Markdown"
     )
     await call.answer("✅ Plan activated!")
@@ -1130,12 +1186,12 @@ async def help_rules(call: CallbackQuery):
         "🌐 **About NIKAN**\n\n"
         "NIKAN একটি online earning service demo interface, "
         "যেখানে earning features, referral program এবং available plans "
-        "দেখানো হয়।\n\n"
+        "দেখানো হয়।\n\n"
         "📊 Track Your Earnings\n"
         "👥 Referral Program\n"
         "🧾 Transaction History\n"
         "🆘 User Support\n\n"
-        "⚠️ **কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
+        "⚠️ **কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।**",
         parse_mode="Markdown"
     )
     await call.answer()
@@ -1160,7 +1216,7 @@ async def admin_dep_approve(call: CallbackQuery):
 
     if not row:
         con.close()
-        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
         return
 
     did, uid, amount, txid, status = row
@@ -1210,7 +1266,7 @@ async def admin_dep_reject(call: CallbackQuery):
 
     if not row:
         con.close()
-        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
         return
 
     did, uid, amount, txid, status = row
@@ -1223,10 +1279,10 @@ async def admin_dep_reject(call: CallbackQuery):
     await bot.send_message(
         uid,
         "❌ **Deposit Failed!**\n\n"
-        "আপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি।\n\n"
+        "আপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি।\n\n"
         f"📝 **Transaction ID:** `{txid}`\n"
         f"🆔 **Order No:** `{oid}`\n\n"
-        "🔄 **অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।** "
+        "🔄 **অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।** "
         "পেমেন্ট সম্পন্ন না করে থাকলে আগে পেমেন্ট সম্পন্ন করুন।",
         parse_mode="Markdown"
     )
@@ -1258,7 +1314,7 @@ async def admin_wd_approve(call: CallbackQuery):
 
     if not row:
         con.close()
-        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
         return
 
     uid, method, account_no, amount, status = row
@@ -1278,9 +1334,9 @@ async def admin_wd_approve(call: CallbackQuery):
         "🎊 **উইথড্র কনফার্মড!**\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"💰 **পরিমাণ:** {money(amount)}৳\n"
-        "🟢 আপনার পেমেন্ট রিকোয়েস্ট সফলভাবে অনুমোদিত হয়েছে।\n"
+        "🟢 আপনার পেমেন্ট রিকোয়েস্ট সফলভাবে অনুমোদিত হয়েছে।\n"
         f"📲 নির্ধারিত **{method}** নম্বর: `{account_no}`\n\n"
-        "ℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।",
+        "ℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।",
         parse_mode="Markdown"
     )
     await call.message.edit_reply_markup(reply_markup=None)
@@ -1308,7 +1364,7 @@ async def admin_wd_reject(call: CallbackQuery):
 
     if not row:
         con.close()
-        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
+        await call.answer("Request পাওয়া যায়নি।", show_alert=True)
         return
 
     uid, amount, status = row
@@ -1346,7 +1402,7 @@ async def admin_wd_reject(call: CallbackQuery):
 @dp.callback_query(F.data == "cancel_inline")
 async def inline_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("❌ **বাতিল করা হয়েছে।**", parse_mode="Markdown", reply_markup=main_keyboard(call.from_user.id))
+    await call.message.answer("❌ **বাতিল করা হয়েছে।**", parse_mode="Markdown", reply_markup=main_keyboard(call.from_user.id))
     await call.answer()
 
 
@@ -1573,7 +1629,7 @@ async def x_value(message: Message, state: FSMContext):
     k = (await state.get_data())['key']
     setset(k, money(v))
     await state.clear()
-    await message.answer(f'✅ **{k} = {money(v)} সেট হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
+    await message.answer(f'✅ **{k} = {money(v)} সেট হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
 
 
 @dp.callback_query(F.data == 'x:force')
@@ -1620,7 +1676,7 @@ async def x_fjlink(message: Message, state: FSMContext):
     setset('force_join_link', link)
     setset('force_join_enabled', '1')
     await state.clear()
-    await message.answer('✅ **Force Join set ও ON হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
+    await message.answer('✅ **Force Join set ও ON হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
 
 
 @dp.callback_query(F.data == 'x:fjrm')
@@ -1640,7 +1696,7 @@ async def x_user(call: CallbackQuery):
       [InlineKeyboardButton(text='💰 Edit Balances / Referral Count', callback_data='x:usearch')],
       [InlineKeyboardButton(text='💎 Plan Add', callback_data='x:plan')],
       [InlineKeyboardButton(text='⬅️ Back', callback_data='x:open')]])
-    await call.message.edit_text('👤 **USER CONTROL PANEL**\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।', parse_mode="Markdown", reply_markup=kb)
+    await call.message.edit_text('👤 **USER CONTROL PANEL**\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।', parse_mode="Markdown", reply_markup=kb)
     await call.answer()
 
 
@@ -1657,12 +1713,23 @@ async def x_userid(message: Message, state: FSMContext):
         return
     try:
         uid = int(message.text.strip())
-    except: 
+    except Exception: 
         return await message.answer('❌ **Numeric User ID দিন।**', parse_mode="Markdown")
-    r = user_row(uid)
+
+    # ✅ FIX: আগে ভুল column index থেকে Task/Referrals/Ban/Suspend দেখানো হচ্ছিল।
+    # এখন নাম ধরে নির্দিষ্ট column select করা হয়েছে, তাই সব তথ্য সঠিক দেখাবে।
+    con = db()
+    r = con.execute("""
+        SELECT user_id, name, username, main_balance, deposit_balance,
+               bonus_balance, referral_balance, task_balance,
+               referral_count, banned, suspended
+        FROM users WHERE user_id=?
+    """, (uid,)).fetchone()
+    con.close()
+
     if not r: 
         await state.clear()
-        return await message.answer('❌ **User পাওয়া যায়নি।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
+        return await message.answer('❌ **User পাওয়া যায়নি।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
       [InlineKeyboardButton(text='🚫 Ban', callback_data=f'x:ban:{uid}:1'), InlineKeyboardButton(text='✅ Unban', callback_data=f'x:ban:{uid}:0')],
@@ -1672,7 +1739,7 @@ async def x_userid(message: Message, state: FSMContext):
       [InlineKeyboardButton(text='💵 Main Balance', callback_data=f'x:edit:{uid}:main_balance'), InlineKeyboardButton(text='👥 Referral Count', callback_data=f'x:edit:{uid}:referral_count')],
       [InlineKeyboardButton(text='🎁 Bonus → Main', callback_data=f'x:bmain:{uid}')],
     ])
-    await message.answer(f'👤 **USER**\n━━━━━━━━━━━━━━━━━━\n👤 **{r[1]}**\n🔗 **@{r[2] or "None"}**\n🆔 **{r[0]}**\n💵 **Main:** {money(r[3])}৳\n📥 **Deposit:** {money(r[4])}৳\n🫂 **Referral:** {money(r[6])}৳\n🎁 **Bonus:** {money(r[5])}৳\n📝 **Task:** {money(r[7])}৳\n👥 **Referrals:** {r[9]}\n🚫 **Ban:** {"YES" if r[11] else "NO"}\n⛔ **Suspend:** {"YES" if r[12] else "NO"}', parse_mode="Markdown", reply_markup=kb)
+    await message.answer(f'👤 **USER**\n━━━━━━━━━━━━━━━━━━\n👤 **{r[1]}**\n🔗 **@{r[2] or "None"}**\n🆔 **{r[0]}**\n💵 **Main:** {money(r[3])}৳\n📥 **Deposit:** {money(r[4])}৳\n🫂 **Referral:** {money(r[6])}৳\n🎁 **Bonus:** {money(r[5])}৳\n📝 **Task:** {money(r[7])}৳\n👥 **Referrals:** {r[8]}\n🚫 **Ban:** {"YES" if r[9] else "NO"}\n⛔ **Suspend:** {"YES" if r[10] else "NO"}', parse_mode="Markdown", reply_markup=kb)
 
 
 @dp.callback_query(F.data.startswith('x:ban:'))
@@ -1726,7 +1793,7 @@ async def x_edit_value(message: Message, state: FSMContext):
     try:
         v = Decimal(message.text.strip())
         assert v >= 0
-    except:
+    except Exception:
         return await message.answer('❌ **Valid positive number দিন।**', parse_mode="Markdown")
     allowed = {'main_balance', 'deposit_balance', 'referral_balance', 'bonus_balance', 'task_balance', 'referral_count'}
     if field not in allowed:
@@ -1759,7 +1826,7 @@ async def x_plan(call: CallbackQuery, state: FSMContext):
 async def x_plan_uid(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
-    except:
+    except Exception:
         return await message.answer('❌ **Numeric ID দিন।**', parse_mode="Markdown")
     if not user_row(uid):
         return await message.answer('❌ **User not found.**', parse_mode="Markdown")
@@ -1795,7 +1862,7 @@ async def x_ubroadcast(call: CallbackQuery, state: FSMContext):
 async def x_ubid(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
-    except:
+    except Exception:
         return await message.answer('❌ **Numeric ID দিন।**', parse_mode="Markdown")
     if not user_row(uid):
         return await message.answer('❌ **User not found.**', parse_mode="Markdown")
@@ -1810,9 +1877,9 @@ async def x_ubtext(message: Message, state: FSMContext):
     uid = d['uid']
     try:
         await bot.send_message(uid, message.text or '')
-        out = '✅ **Message পাঠানো হয়েছে।**'
+        out = '✅ **Message পাঠানো হয়েছে।**'
     except Exception as e:
-        out = f'❌ **পাঠানো যায়নি:** {type(e).__name__}'
+        out = f'❌ **পাঠানো যায়নি:** {type(e).__name__}'
     await state.clear()
     await message.answer(out, parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
 
@@ -1963,7 +2030,7 @@ async def x_wok(call: CallbackQuery):
     con.execute("UPDATE withdrawals SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?", (now_iso(), wid))
     con.commit()
     con.close()
-    await bot.send_message(uid, f'🎊 **উইথড্র কনফার্মড!**\n💰 **পরিমাণ:** {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে。\n📲 **{m}:** `{acc}`\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না。', parse_mode="Markdown")
+    await bot.send_message(uid, f'🎊 **উইথড্র কনফার্মড!**\n💰 **পরিমাণ:** {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে。\n📲 **{m}:** `{acc}`\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না。', parse_mode="Markdown")
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer('Approved')
 
@@ -1996,7 +2063,7 @@ async def x_reject_reason(message: Message, state: FSMContext):
             return await message.answer('❌ **Request not found.**', parse_mode="Markdown")
         uid, a, t, m, s = r
         cur.execute("UPDATE deposits SET status='Rejected',reason=?,updated_at=? WHERE order_no=?", (reason, now_iso(), rid))
-        await bot.send_message(uid, f'❌ **Deposit Failed!**\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি。\n📝 **Transaction ID:** `{t}`\n🆔 **Order No:** `{rid}`\n\n❗ **Reject Reason:** {reason}\n\n🔄 **অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।**', parse_mode="Markdown")
+        await bot.send_message(uid, f'❌ **Deposit Failed!**\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি。\n📝 **Transaction ID:** `{t}`\n🆔 **Order No:** `{rid}`\n\n❗ **Reject Reason:** {reason}\n\n🔄 **অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।**', parse_mode="Markdown")
     else:
         r = cur.execute('SELECT user_id,amount,method,account,status FROM withdrawals WHERE id=?', (int(rid),)).fetchone()
         if not r:
@@ -2011,7 +2078,7 @@ async def x_reject_reason(message: Message, state: FSMContext):
     con.commit()
     con.close()
     await state.clear()
-    await message.answer('✅ **Status updated এবং user notification পাঠানো হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
+    await message.answer('✅ **Status updated এবং user notification পাঠানো হয়েছে।**', parse_mode="Markdown", reply_markup=main_keyboard(message.from_user.id))
 
 
 @dp.callback_query(F.data == 'x:admins')
@@ -2043,7 +2110,7 @@ async def x_addadmin_msg(message: Message, state: FSMContext):
         return
     try:
         uid = int(message.text.strip())
-    except:
+    except Exception:
         return await message.answer('❌ **Numeric ID দিন।**', parse_mode="Markdown")
     if uid == OWNER_ID:
         return await message.answer('ℹ️ 2037461288 Main Owner।')
@@ -2070,7 +2137,7 @@ async def x_rmadmin_msg(message: Message, state: FSMContext):
         return
     try:
         uid = int(message.text.strip())
-    except:
+    except Exception:
         return await message.answer('❌ **Numeric ID দিন।**', parse_mode="Markdown")
     if uid == OWNER_ID:
         return await message.answer('❌ Main Owner 2037461288 remove করা যাবে না।')
@@ -2097,6 +2164,30 @@ async def x_close(call: CallbackQuery):
 
 
 # =========================
+# ✅ FIX: GLOBAL ERROR HANDLER
+# =========================
+# কোনো handler-এ unexpected error হলে আগে চুপচাপ fail করত।
+# এখন error console-এ log হয় + Admin (আপনি) নোটিফিকেশন পান।
+_last_error_sent = 0.0
+
+
+@dp.errors()
+async def on_error(event: ErrorEvent):
+    global _last_error_sent
+    logging.error("Unhandled exception: %s", event.exception, exc_info=event.exception)
+    now_ts = time.time()
+    if now_ts - _last_error_sent >= 15:  # spam ঠেকাতে ১৫ সেকেন্ড throttle
+        _last_error_sent = now_ts
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ Bot Error!\n{type(event.exception).__name__}: {event.exception}"
+            )
+        except Exception:
+            pass
+
+
+# =========================
 # UNKNOWN TEXT
 # =========================
 @dp.message()
@@ -2112,9 +2203,24 @@ async def fallback(message: Message):
 # RUN
 # =========================
 async def main():
+    # ✅ FIX: একই মেশিনে দ্বিতীয় instance চালু হলে সেটি সাথে সাথে বন্ধ হয়ে যাবে
+    acquire_single_instance_lock()
+
+    logging.basicConfig(level=logging.INFO)
     init_db()
+
+    # ✅ FIX: পুরোনো webhook / জমে থাকা pending update পরিষ্কার করা হয়,
+    # যাতে restart-এর পর পুরোনো মেসেজে বারবার (ডুপ্লিকেট) রিপ্লাই না যায়।
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        print(f"delete_webhook warning: {e}")
+
     print("NIKAN EARN bot started...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
