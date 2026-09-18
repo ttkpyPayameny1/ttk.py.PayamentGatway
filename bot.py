@@ -1299,6 +1299,448 @@ async def inline_cancel(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+
+# =========================
+# ADVANCED ADMIN PANEL
+# =========================
+OWNER_ID = ADMIN_ID
+
+# Extend the existing SQLite database with dynamic admin/config tables.
+def admin_db_init():
+    con = db(); cur = con.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, role TEXT DEFAULT 'admin', added_at TEXT)")
+    cur.execute("INSERT OR IGNORE INTO admins(user_id,role,added_at) VALUES(?,?,?)", (OWNER_ID,'owner',now_iso()))
+    cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    defaults={
+        'bot_enabled':'1','fund_enabled':'1','withdraw_enabled':'1',
+        'dep_bkash_enabled':'1','dep_nagad_enabled':'1',
+        'wth_bkash_enabled':'1','wth_nagad_enabled':'1','wth_rocket_enabled':'1','wth_upay_enabled':'1',
+        'bkash_number':'','nagad_number':'','dep_bkash_gateway':'','dep_nagad_gateway':'',
+        'min_dep':'50','max_dep':'10000','min_wth':'100','max_wth':'25000','daily_dep_limit':'3',
+        'force_join_enabled':'0','force_join_chat':'','force_join_link':''
+    }
+    for k,v in defaults.items(): cur.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+    # Add missing user fields to older DBs.
+    cols={r[1] for r in cur.execute('PRAGMA table_info(users)').fetchall()}
+    for col,typ,default in [('task_balance','REAL','0'),('referral_count','INTEGER','0'),('completed_tasks','INTEGER','0'),('banned','INTEGER','0'),('suspended','INTEGER','0')]:
+        if col not in cols: cur.execute(f'ALTER TABLE users ADD COLUMN {col} {typ} DEFAULT {default}')
+    con.commit(); con.close()
+
+admin_db_init()
+
+def getset(k, default=''):
+    con=db(); r=con.execute('SELECT value FROM settings WHERE key=?',(k,)).fetchone(); con.close()
+    return r[0] if r else default
+
+def setset(k,v):
+    con=db(); con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(k,str(v))); con.commit(); con.close()
+
+def role(uid):
+    con=db(); r=con.execute('SELECT role FROM admins WHERE user_id=?',(uid,)).fetchone(); con.close(); return r[0] if r else None
+
+def admin_ok(uid): return role(uid) is not None
+
+def super_ok(uid): return uid == OWNER_ID
+
+def a_toggle(label,key): return f'{label}: ' + ('🟢 ON' if getset(key)=='1' else '🔴 OFF')
+
+def admin_kb(uid):
+    rows=[
+      [InlineKeyboardButton(text='📊 Dashboard',callback_data='x:dash')],
+      [InlineKeyboardButton(text='⚙️ Bot Controls',callback_data='x:controls'),InlineKeyboardButton(text='💳 Payment Controls',callback_data='x:pay')],
+      [InlineKeyboardButton(text='📈 Limits',callback_data='x:limits'),InlineKeyboardButton(text='📣 Force Join',callback_data='x:force')],
+      [InlineKeyboardButton(text='👤 User Control',callback_data='x:user'),InlineKeyboardButton(text='📥 Deposits',callback_data='x:deps')],
+      [InlineKeyboardButton(text='💸 Withdraws',callback_data='x:wds'),InlineKeyboardButton(text='📢 Broadcast',callback_data='x:broadcast')],
+      [InlineKeyboardButton(text='✉️ User Broadcast',callback_data='x:ubroadcast')],
+    ]
+    if super_ok(uid): rows.append([InlineKeyboardButton(text='👑 Admin Management',callback_data='x:admins')])
+    rows.append([InlineKeyboardButton(text='⬅️ Main Menu',callback_data='x:close')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+class AdvancedAdminState(StatesGroup):
+    generic_value=State(); user_id=State(); user_action=State(); user_value=State(); broadcast=State(); user_broadcast_id=State(); user_broadcast_text=State(); gateway_url=State(); number=State(); force_chat=State(); force_link=State(); add_admin=State(); remove_admin=State(); reject_reason=State(); plan_uid=State(); plan_name=State()
+
+@dp.message(F.text=='🔧 Admin Panel')
+async def advanced_admin_button(message:Message):
+    if not admin_ok(message.from_user.id):
+        await message.answer('❌ আপনার Admin access নেই।'); return
+    await message.answer('🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface',reply_markup=admin_kb(message.from_user.id))
+
+@dp.callback_query(F.data=='x:dash')
+async def x_dash(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    con=db(); cur=con.cursor()
+    users=cur.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    vip=cur.execute('SELECT COUNT(DISTINCT user_id) FROM plans').fetchone()[0] if cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").fetchone() else 0
+    fund=cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status IN ('Approved','Success')").fetchone()[0]
+    wth=cur.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status IN ('Approved','Success')").fetchone()[0]
+    con.close()
+    await call.message.edit_text(f'📊 LIVE ADMIN DASHBOARD\n━━━━━━━━━━━━━━━━━━\n👥 Total Users: {users}\n💎 VIP Buyers: {vip}\n💰 Total Fund: {money(fund)}৳\n💸 Total Withdraw: {money(wth)}৳\n\n🤖 Bot: {"🟢 ON" if getset("bot_enabled")=="1" else "🔴 OFF"}',reply_markup=admin_kb(call.from_user.id)); await call.answer()
+
+@dp.callback_query(F.data=='x:controls')
+async def x_controls(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text=a_toggle('🤖 Bot','bot_enabled'),callback_data='x:t:bot_enabled')],
+      [InlineKeyboardButton(text=a_toggle('💰 Fund','fund_enabled'),callback_data='x:t:fund_enabled')],
+      [InlineKeyboardButton(text=a_toggle('💸 Withdraw','withdraw_enabled'),callback_data='x:t:withdraw_enabled')],
+      [InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text('⚙️ BOT / MASTER CONTROLS',reply_markup=kb); await call.answer()
+
+@dp.callback_query(F.data.startswith('x:t:'))
+async def x_toggle(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    key=call.data.split(':')[-1]; setset(key,'0' if getset(key)=='1' else '1'); await call.answer('Updated'); await x_controls(call)
+
+@dp.callback_query(F.data=='x:pay')
+async def x_pay(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text=a_toggle('Dep bKash','dep_bkash_enabled'),callback_data='x:t:dep_bkash_enabled'),InlineKeyboardButton(text=a_toggle('Dep Nagad','dep_nagad_enabled'),callback_data='x:t:dep_nagad_enabled')],
+      [InlineKeyboardButton(text=a_toggle('Wth bKash','wth_bkash_enabled'),callback_data='x:t:wth_bkash_enabled'),InlineKeyboardButton(text=a_toggle('Wth Nagad','wth_nagad_enabled'),callback_data='x:t:wth_nagad_enabled')],
+      [InlineKeyboardButton(text=a_toggle('Wth Rocket','wth_rocket_enabled'),callback_data='x:t:wth_rocket_enabled'),InlineKeyboardButton(text=a_toggle('Wth Upay','wth_upay_enabled'),callback_data='x:t:wth_upay_enabled')],
+      [InlineKeyboardButton(text='🔄 All Withdraw ON/OFF',callback_data='x:allw')],
+      [InlineKeyboardButton(text='📲 Set bKash Number',callback_data='x:num:bKash'),InlineKeyboardButton(text='📲 Set Nagad Number',callback_data='x:num:Nagad')],
+      [InlineKeyboardButton(text='🔗 Add/Edit bKash Gateway',callback_data='x:gw:bKash'),InlineKeyboardButton(text='🔗 Add/Edit Nagad Gateway',callback_data='x:gw:Nagad')],
+      [InlineKeyboardButton(text='🗑 Remove bKash Gateway',callback_data='x:rm:bKash'),InlineKeyboardButton(text='🗑 Remove Nagad Gateway',callback_data='x:rm:Nagad')],
+      [InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text('💳 PAYMENT CONTROLS\n━━━━━━━━━━━━━━━━━━\nবিকাশ/নগদের Payment Gateway link এখান থেকেই Add/Edit/Remove করা যাবে।',reply_markup=kb); await call.answer()
+
+@dp.callback_query(F.data=='x:allw')
+async def x_allw(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    keys=['wth_bkash_enabled','wth_nagad_enabled','wth_rocket_enabled','wth_upay_enabled']; new='0' if all(getset(k)=='1' for k in keys) else '1'
+    for k in keys:setset(k,new)
+    await x_pay(call)
+
+@dp.callback_query(F.data.startswith('x:num:'))
+async def x_num_prompt(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    await state.update_data(method=call.data.split(':')[-1]); await state.set_state(AdvancedAdminState.number); await call.message.answer('📲 নতুন ১১ ডিজিটের নম্বর পাঠান।'); await call.answer()
+
+@dp.message(AdvancedAdminState.number)
+async def x_num(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id): return
+    n=message.text.strip()
+    if not re.fullmatch(r'01[3-9]\d{8}',n): return await message.answer('❌ সঠিক ১১ ডিজিটের নম্বর দিন।')
+    m=(await state.get_data())['method']; setset('bkash_number' if m=='bKash' else 'nagad_number',n); await state.clear(); await message.answer(f'✅ {m} number updated: {n}',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data.startswith('x:gw:'))
+async def x_gw_prompt(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    await state.update_data(method=call.data.split(':')[-1]); await state.set_state(AdvancedAdminState.gateway_url); await call.message.answer('🔗 Payment Gateway URL পাঠান (https://...)।'); await call.answer()
+
+@dp.message(AdvancedAdminState.gateway_url)
+async def x_gw(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id): return
+    url=message.text.strip()
+    if not re.match(r'^https?://',url): return await message.answer('❌ Valid http/https URL দিন।')
+    m=(await state.get_data())['method']; setset('dep_bkash_gateway' if m=='bKash' else 'dep_nagad_gateway',url); await state.clear(); await message.answer(f'✅ {m} gateway saved.',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data.startswith('x:rm:'))
+async def x_rm_gw(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    m=call.data.split(':')[-1]; setset('dep_bkash_gateway' if m=='bKash' else 'dep_nagad_gateway',''); await call.answer('Gateway removed',show_alert=True); await x_pay(call)
+
+@dp.callback_query(F.data=='x:limits')
+async def x_limits(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text=f'Min Dep {getset("min_dep")}৳',callback_data='x:v:min_dep'),InlineKeyboardButton(text=f'Max Dep {getset("max_dep")}৳',callback_data='x:v:max_dep')],
+      [InlineKeyboardButton(text=f'Min Wth {getset("min_wth")}৳',callback_data='x:v:min_wth'),InlineKeyboardButton(text=f'Max Wth {getset("max_wth")}৳',callback_data='x:v:max_wth')],
+      [InlineKeyboardButton(text=f'Daily Dep Limit {getset("daily_dep_limit")}',callback_data='x:v:daily_dep_limit')],
+      [InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text('📈 LIMIT & AMOUNT CONFIGURATION',reply_markup=kb); await call.answer()
+
+@dp.callback_query(F.data.startswith('x:v:'))
+async def x_value_prompt(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    await state.update_data(key=call.data.split(':')[-1]); await state.set_state(AdvancedAdminState.generic_value); await call.message.answer('✏️ নতুন সংখ্যাটি পাঠান।'); await call.answer()
+
+@dp.message(AdvancedAdminState.generic_value)
+async def x_value(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id): return
+    try:v=Decimal(message.text.strip()); assert v>=0
+    except Exception:return await message.answer('❌ Valid positive number দিন।')
+    k=(await state.get_data())['key']; setset(k,money(v)); await state.clear(); await message.answer(f'✅ {k} = {money(v)} সেট হয়েছে।',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data=='x:force')
+async def x_force(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text=a_toggle('📣 Force Join','force_join_enabled'),callback_data='x:tforce')],
+      [InlineKeyboardButton(text='➕ Set Channel/Group',callback_data='x:fjset'),InlineKeyboardButton(text='🗑 Remove',callback_data='x:fjrm')],
+      [InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text(f'📣 FORCE JOIN\nChat: {getset("force_join_chat") or "Not set"}\nLink: {getset("force_join_link") or "Not set"}',reply_markup=kb); await call.answer()
+
+@dp.callback_query(F.data=='x:tforce')
+async def x_tforce(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    setset('force_join_enabled','0' if getset('force_join_enabled')=='1' else '1'); await x_force(call)
+
+@dp.callback_query(F.data=='x:fjset')
+async def x_fjset(call:CallbackQuery,state:FSMContext):
+    await state.set_state(AdvancedAdminState.force_chat); await call.message.answer('📣 Channel username বা chat ID পাঠান। যেমন @NIKAN_EARN'); await call.answer()
+
+@dp.message(AdvancedAdminState.force_chat)
+async def x_fjchat(message:Message,state:FSMContext):
+    await state.update_data(chat=message.text.strip()); await state.set_state(AdvancedAdminState.force_link); await message.answer('🔗 Join link পাঠান।')
+
+@dp.message(AdvancedAdminState.force_link)
+async def x_fjlink(message:Message,state:FSMContext):
+    link=message.text.strip()
+    if not re.match(r'^https?://',link): return await message.answer('❌ Valid URL দিন।')
+    d=await state.get_data(); setset('force_join_chat',d['chat']); setset('force_join_link',link); setset('force_join_enabled','1'); await state.clear(); await message.answer('✅ Force Join set ও ON হয়েছে।',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data=='x:fjrm')
+async def x_fjrm(call:CallbackQuery):
+    setset('force_join_enabled','0');setset('force_join_chat','');setset('force_join_link','');await x_force(call)
+
+@dp.callback_query(F.data=='x:user')
+async def x_user(call:CallbackQuery):
+    if not admin_ok(call.from_user.id): return await call.answer('Admin only',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text='🔎 Search User by ID',callback_data='x:usearch')],
+      [InlineKeyboardButton(text='💰 Edit Balances / Referral Count',callback_data='x:usearch')],
+      [InlineKeyboardButton(text='💎 Plan Add',callback_data='x:plan')],
+      [InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text('👤 USER CONTROL PANEL\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।',reply_markup=kb); await call.answer()
+
+@dp.callback_query(F.data=='x:usearch')
+async def x_usearch(call:CallbackQuery,state:FSMContext):
+    await state.set_state(AdvancedAdminState.user_id); await call.message.answer('🆔 User Telegram ID পাঠান।'); await call.answer()
+
+@dp.message(AdvancedAdminState.user_id)
+async def x_userid(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id): return
+    try:uid=int(message.text.strip())
+    except: return await message.answer('❌ Numeric User ID দিন।')
+    r=user_row(uid)
+    if not r: await state.clear(); return await message.answer('❌ User পাওয়া যায়নি।',reply_markup=main_keyboard(message.from_user.id))
+    await state.clear()
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text='🚫 Ban',callback_data=f'x:ban:{uid}:1'),InlineKeyboardButton(text='✅ Unban',callback_data=f'x:ban:{uid}:0')],
+      [InlineKeyboardButton(text='⛔ Suspend',callback_data=f'x:sus:{uid}:1'),InlineKeyboardButton(text='🟢 Unsuspend',callback_data=f'x:sus:{uid}:0')],
+      [InlineKeyboardButton(text='💰 Deposit Balance',callback_data=f'x:edit:{uid}:deposit_balance'),InlineKeyboardButton(text='🫂 Referral Balance',callback_data=f'x:edit:{uid}:referral_balance')],
+      [InlineKeyboardButton(text='🎁 Bonus Balance',callback_data=f'x:edit:{uid}:bonus_balance'),InlineKeyboardButton(text='📝 Task Balance',callback_data=f'x:edit:{uid}:task_balance')],
+      [InlineKeyboardButton(text='💵 Main Balance',callback_data=f'x:edit:{uid}:main_balance'),InlineKeyboardButton(text='👥 Referral Count',callback_data=f'x:edit:{uid}:referral_count')],
+      [InlineKeyboardButton(text='🎁 Bonus → Main',callback_data=f'x:bmain:{uid}')],
+    ])
+    await message.answer(f'👤 USER\n━━━━━━━━━━━━━━━━━━\n👤 {r[1]}\n🔗 @{r[2] or "None"}\n🆔 {r[0]}\n💵 Main: {money(r[3])}৳\n📥 Deposit: {money(r[4])}৳\n🫂 Referral: {money(r[6])}৳\n🎁 Bonus: {money(r[5])}৳\n📝 Task: {money(r[7])}৳\n👥 Referrals: {r[9]}\n🚫 Ban: {"YES" if r[11] else "NO"}\n⛔ Suspend: {"YES" if r[12] else "NO"}',reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('x:ban:'))
+async def x_ban(call:CallbackQuery):
+    _,_,uid,val=call.data.split(':'); uid=int(uid); val=int(val)
+    if uid==OWNER_ID:return await call.answer('Owner cannot be banned.',show_alert=True)
+    con=db();con.execute('UPDATE users SET banned=? WHERE user_id=?',(val,uid));con.commit();con.close();await call.answer('Updated');await call.message.answer(f'✅ Ban status: {"ON" if val else "OFF"}')
+
+@dp.callback_query(F.data.startswith('x:sus:'))
+async def x_sus(call:CallbackQuery):
+    _,_,uid,val=call.data.split(':');uid=int(uid);val=int(val)
+    if uid==OWNER_ID:return await call.answer('Owner cannot be suspended.',show_alert=True)
+    con=db();con.execute('UPDATE users SET suspended=? WHERE user_id=?',(val,uid));con.commit();con.close();await call.answer('Updated');await call.message.answer(f'✅ Suspend status: {"ON" if val else "OFF"}')
+
+@dp.callback_query(F.data.startswith('x:edit:'))
+async def x_edit_prompt(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    _,_,uid,field=call.data.split(':');await state.update_data(uid=int(uid),field=field);await state.set_state(AdvancedAdminState.user_value);await call.message.answer(f'✏️ {field}\nনতুন absolute value পাঠান।');await call.answer()
+
+@dp.message(AdvancedAdminState.user_value)
+async def x_edit_value(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id):return
+    d=await state.get_data();field=d['field'];uid=d['uid']
+    try:v=Decimal(message.text.strip());assert v>=0
+    except:return await message.answer('❌ Valid positive number দিন।')
+    allowed={'main_balance','deposit_balance','referral_balance','bonus_balance','task_balance','referral_count'}
+    if field not in allowed:return
+    con=db();con.execute(f'UPDATE users SET {field}=? WHERE user_id=?',(float(v),uid));con.commit();con.close();await state.clear();await message.answer(f'✅ User {uid}: {field} = {money(v)}',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data.startswith('x:bmain:'))
+async def x_bmain_prompt(call:CallbackQuery,state:FSMContext):
+    uid=int(call.data.split(':')[-1]);await state.update_data(uid=uid);await state.set_state(AdvancedAdminState.user_value);await call.message.answer('🎁 Bonus Balance থেকে কত টাকা Main Balance-এ transfer করবেন?');await call.answer()
+
+@dp.callback_query(F.data=='x:plan')
+async def x_plan(call:CallbackQuery,state:FSMContext):
+    await state.set_state(AdvancedAdminState.plan_uid);await call.message.answer('🆔 User ID পাঠান।');await call.answer()
+
+@dp.message(AdvancedAdminState.plan_uid)
+async def x_plan_uid(message:Message,state:FSMContext):
+    try:uid=int(message.text.strip())
+    except:return await message.answer('❌ Numeric ID দিন।')
+    if not user_row(uid):return await message.answer('❌ User not found.')
+    await state.update_data(uid=uid);await state.set_state(AdvancedAdminState.plan_name)
+    names=list(PLANS);kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=p,callback_data=f'x:padd:{uid}:{p}') for p in names[i:i+3]] for i in range(0,len(names),3)])
+    await message.answer('💎 Plan নির্বাচন করুন।',reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('x:padd:'))
+async def x_plan_add(call:CallbackQuery,state:FSMContext):
+    _,_,uid,p=call.data.split(':');uid=int(uid)
+    con=db();cur=con.cursor();cur.execute('INSERT INTO plans(user_id,plan,amount,activated_at,expires_at,active) VALUES(?,?,?,?,?,1)',(uid,p,PLANS[p],now_iso(),(datetime.now(timezone.utc)+timedelta(days=4)).isoformat()));con.commit();con.close();await state.clear();await call.message.answer(f'✅ {p} added to {uid}.');await call.answer('Added')
+
+# Direct user broadcast
+@dp.callback_query(F.data=='x:ubroadcast')
+async def x_ubroadcast(call:CallbackQuery,state:FSMContext):
+    await state.set_state(AdvancedAdminState.user_broadcast_id);await call.message.answer('🆔 User ID পাঠান।');await call.answer()
+
+@dp.message(AdvancedAdminState.user_broadcast_id)
+async def x_ubid(message:Message,state:FSMContext):
+    try:uid=int(message.text.strip())
+    except:return await message.answer('❌ Numeric ID দিন।')
+    if not user_row(uid):return await message.answer('❌ User not found.')
+    await state.update_data(uid=uid);await state.set_state(AdvancedAdminState.user_broadcast_text);await message.answer('✉️ Message লিখুন।')
+
+@dp.message(AdvancedAdminState.user_broadcast_text)
+async def x_ubtext(message:Message,state:FSMContext):
+    d=await state.get_data();uid=d['uid']
+    try:await bot.send_message(uid,message.text or '');out='✅ Message পাঠানো হয়েছে।'
+    except Exception as e:out=f'❌ পাঠানো যায়নি: {type(e).__name__}'
+    await state.clear();await message.answer(out,reply_markup=main_keyboard(message.from_user.id))
+
+# Global broadcast with confirmation
+@dp.callback_query(F.data=='x:broadcast')
+async def x_broadcast(call:CallbackQuery,state:FSMContext):
+    await state.set_state(AdvancedAdminState.broadcast);await call.message.answer('📢 Broadcast message লিখুন। তারপর Confirm/Cancel দেখানো হবে।');await call.answer()
+
+@dp.message(AdvancedAdminState.broadcast)
+async def x_bc_preview(message:Message,state:FSMContext):
+    await state.update_data(text=message.text or '')
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Confirm',callback_data='x:bcok'),InlineKeyboardButton(text='❌ Cancel',callback_data='x:bccancel')]])
+    await message.answer('📢 BROADCAST PREVIEW\n━━━━━━━━━━━━━━━━━━\n'+(message.text or '')+'\n━━━━━━━━━━━━━━━━━━\nসকল user-কে পাঠাবেন?',reply_markup=kb)
+
+@dp.callback_query(F.data=='x:bccancel')
+async def x_bccancel(call:CallbackQuery,state:FSMContext):await state.clear();await call.message.edit_text('❌ Broadcast cancelled.');await call.answer()
+
+@dp.callback_query(F.data=='x:bcok')
+async def x_bcok(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    textmsg=(await state.get_data()).get('text','');await state.clear();con=db();ids=[r[0] for r in con.execute('SELECT user_id FROM users WHERE banned=0 AND suspended=0')];con.close();sent=fail=0
+    for uid in ids:
+        try:await bot.send_message(uid,textmsg);sent+=1
+        except:fail+=1
+        await asyncio.sleep(.04)
+    await call.message.edit_text(f'📢 Broadcast finished.\n✅ Sent: {sent}\n❌ Failed: {fail}');await call.answer()
+
+# Requests lists and reject-reason workflow.
+@dp.callback_query(F.data=='x:deps')
+async def x_deps(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    con=db();rows=con.execute("SELECT id,user_id,method,amount,txid,order_no,status FROM deposits WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall();con.close()
+    if not rows:return await call.message.answer('📥 No pending deposits.')
+    for did,uid,m,a,t,o,s in rows:
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⚙️ Processing',callback_data=f'x:dproc:{did}')],[InlineKeyboardButton(text='✅ Approve',callback_data=f'x:dok:{o}'),InlineKeyboardButton(text='❌ Reject',callback_data=f'x:dno:{o}')]])
+        await call.message.answer(f'📥 #{did}\n👤 {uid}\n💳 {m}\n💰 {money(a)}৳\n📝 {t}\n🆔 {o}\n📌 {s}',reply_markup=kb)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith('x:dproc:'))
+async def x_dproc(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return
+    did=int(call.data.split(':')[-1]);con=db();con.execute("UPDATE deposits SET status='Processing',updated_at=? WHERE id=?",(now_iso(),did));con.commit();con.close();await call.answer('Processing')
+
+@dp.callback_query(F.data.startswith('x:dok:'))
+async def x_dok(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    oid=call.data.split(':')[-1];con=db();cur=con.cursor();r=cur.execute('SELECT id,user_id,method,amount,txid,status FROM deposits WHERE order_no=?',(oid,)).fetchone()
+    if not r:con.close();return await call.answer('Not found',show_alert=True)
+    did,uid,m,a,t,s=r
+    if s=='Approved':con.close();return await call.answer('Already approved',show_alert=True)
+    cur.execute("UPDATE deposits SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?",(now_iso(),did));cur.execute('UPDATE users SET main_balance=main_balance+?,deposit_balance=deposit_balance+? WHERE user_id=?',(a,a,uid));con.commit();con.close()
+    await bot.send_message(uid,f'🎉 Deposit Successful!\nআপনার {m} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅\n━━━━━━━━━━━━━━━━━━\n💰 Deposit Amount: {money(a)} BDT\n📝 Transaction ID: {t}\n🆔 Order Number: {oid}\n━━━━━━━━━━━━━━━━━━\n💳 আপনার মূল ডিপোজিট ব্যালেন্সে {money(a)} BDT যোগ করা হয়েছে।\nধন্যবাদ। ❤️\n\nℹ️ Admin reason: Approved by admin')
+    await call.message.edit_reply_markup(reply_markup=None);await call.answer('Approved')
+
+@dp.callback_query(F.data.startswith('x:dno:'))
+async def x_dno(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    oid=call.data.split(':')[-1];await state.update_data(kind='deposit',rid=oid);await state.set_state(AdvancedAdminState.reject_reason);await call.message.answer('❌ Reject Reason লিখুন।');await call.answer()
+
+@dp.callback_query(F.data=='x:wds')
+async def x_wds(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    con=db();rows=con.execute("SELECT id,user_id,method,account,amount,status FROM withdrawals WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall();con.close()
+    if not rows:return await call.message.answer('📤 No pending withdrawals.')
+    for wid,uid,m,acc,a,s in rows:
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⚙️ Processing',callback_data=f'x:wproc:{wid}')],[InlineKeyboardButton(text='✅ Approve',callback_data=f'x:wok:{wid}'),InlineKeyboardButton(text='❌ Reject',callback_data=f'x:wno:{wid}')]])
+        await call.message.answer(f'📤 #{wid}\n👤 {uid}\n💳 {m}\n📲 {acc}\n💰 {money(a)}৳\n📌 {s}',reply_markup=kb)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith('x:wproc:'))
+async def x_wproc(call:CallbackQuery):
+    wid=int(call.data.split(':')[-1]);con=db();con.execute("UPDATE withdrawals SET status='Processing',updated_at=? WHERE id=?",(now_iso(),wid));con.commit();con.close();await call.answer('Processing')
+
+@dp.callback_query(F.data.startswith('x:wok:'))
+async def x_wok(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    wid=int(call.data.split(':')[-1]);con=db();r=con.execute('SELECT user_id,method,account,amount,status FROM withdrawals WHERE id=?',(wid,)).fetchone()
+    if not r:con.close();return await call.answer('Not found',show_alert=True)
+    uid,m,acc,a,s=r
+    if s=='Approved':con.close();return await call.answer('Already approved',show_alert=True)
+    con.execute("UPDATE withdrawals SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?",(now_iso(),wid));con.commit();con.close()
+    await bot.send_message(uid,f'🎊 উইথড্র কনফার্মড!\n💰 পরিমাণ: {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে।\n📲 {m}: {acc}\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।');await call.message.edit_reply_markup(reply_markup=None);await call.answer('Approved')
+
+@dp.callback_query(F.data.startswith('x:wno:'))
+async def x_wno(call:CallbackQuery,state:FSMContext):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    wid=int(call.data.split(':')[-1]);await state.update_data(kind='withdraw',rid=wid);await state.set_state(AdvancedAdminState.reject_reason);await call.message.answer('❌ Withdraw Reject Reason লিখুন।');await call.answer()
+
+@dp.message(AdvancedAdminState.reject_reason)
+async def x_reject_reason(message:Message,state:FSMContext):
+    if not admin_ok(message.from_user.id):return
+    d=await state.get_data();kind,rid=d['kind'],d['rid'];reason=message.text.strip();con=db();cur=con.cursor()
+    if kind=='deposit':
+        r=cur.execute('SELECT user_id,amount,txid,method,status FROM deposits WHERE order_no=?',(rid,)).fetchone()
+        if not r:con.close();await state.clear();return await message.answer('❌ Request not found.')
+        uid,a,t,m,s=r;cur.execute("UPDATE deposits SET status='Rejected',reason=?,updated_at=? WHERE order_no=?",(reason,now_iso(),rid))
+        await bot.send_message(uid,f'❌ Deposit Failed!\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি।\n📝 Transaction ID: {t}\n🆔 Order No: {rid}\n\n❗ Reject Reason: {reason}\n\n🔄 অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।')
+    else:
+        r=cur.execute('SELECT user_id,amount,method,account,status FROM withdrawals WHERE id=?',(int(rid),)).fetchone()
+        if not r:con.close();await state.clear();return await message.answer('❌ Request not found.')
+        uid,a,m,acc,s=r
+        if s!='Rejected':cur.execute("UPDATE withdrawals SET status='Rejected',reason=?,updated_at=? WHERE id=?",(reason,now_iso(),int(rid)));cur.execute('UPDATE users SET main_balance=main_balance+? WHERE user_id=?',(a,uid))
+        await bot.send_message(uid,f'🚫 WITHDRAW CANCELLED\n💰 Amount: {money(a)}৳\nআপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে।\n↩️ {money(a)}৳ আপনার অ্যাকাউন্ট ব্যালেন্সে পুনরায় যোগ হয়েছে।\n\n❗ Reject Reason: {reason}')
+    con.commit();con.close();await state.clear();await message.answer('✅ Status updated এবং user notification পাঠানো হয়েছে।',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data=='x:admins')
+async def x_admins(call:CallbackQuery):
+    if not super_ok(call.from_user.id):await call.message.answer('শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!');return await call.answer()
+    con=db();rows=con.execute('SELECT user_id,role FROM admins ORDER BY user_id').fetchall();con.close();text='👑 ADMIN MANAGEMENT\n━━━━━━━━━━━━━━━━━━\n'+('\n'.join(f'🆔 {u} — {r}' for u,r in rows) or 'None')
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='➕ Add Admin',callback_data='x:addadmin'),InlineKeyboardButton(text='➖ Remove Admin',callback_data='x:rmadmin')],[InlineKeyboardButton(text='⬅️ Back',callback_data='x:open')]])
+    await call.message.edit_text(text,reply_markup=kb);await call.answer()
+
+@dp.callback_query(F.data=='x:addadmin')
+async def x_addadmin(call:CallbackQuery,state:FSMContext):
+    if not super_ok(call.from_user.id):return await call.message.answer('শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!')
+    await state.set_state(AdvancedAdminState.add_admin);await call.message.answer('🆔 নতুন Admin Telegram ID পাঠান।');await call.answer()
+
+@dp.message(AdvancedAdminState.add_admin)
+async def x_addadmin_msg(message:Message,state:FSMContext):
+    if not super_ok(message.from_user.id):return
+    try:uid=int(message.text.strip())
+    except:return await message.answer('❌ Numeric ID দিন।')
+    if uid==OWNER_ID:return await message.answer('ℹ️ 2037461288 Main Owner।')
+    con=db();con.execute('INSERT OR REPLACE INTO admins(user_id,role,added_at) VALUES(?,?,?)',(uid,'admin',now_iso()));con.commit();con.close();await state.clear();await message.answer(f'✅ Admin {uid} added.',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data=='x:rmadmin')
+async def x_rmadmin(call:CallbackQuery,state:FSMContext):
+    if not super_ok(call.from_user.id):return await call.message.answer('শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!')
+    await state.set_state(AdvancedAdminState.remove_admin);await call.message.answer('🆔 যে Admin remove করবেন তার ID পাঠান।');await call.answer()
+
+@dp.message(AdvancedAdminState.remove_admin)
+async def x_rmadmin_msg(message:Message,state:FSMContext):
+    if not super_ok(message.from_user.id):return
+    try:uid=int(message.text.strip())
+    except:return await message.answer('❌ Numeric ID দিন।')
+    if uid==OWNER_ID:return await message.answer('❌ Main Owner 2037461288 remove করা যাবে না।')
+    con=db();con.execute('DELETE FROM admins WHERE user_id=?',(uid,));con.commit();con.close();await state.clear();await message.answer(f'✅ Admin {uid} removed.',reply_markup=main_keyboard(message.from_user.id))
+
+@dp.callback_query(F.data=='x:open')
+async def x_open(call:CallbackQuery):
+    if not admin_ok(call.from_user.id):return await call.answer('Admin only',show_alert=True)
+    await call.message.edit_text('🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface',reply_markup=admin_kb(call.from_user.id));await call.answer()
+
+@dp.callback_query(F.data=='x:close')
+async def x_close(call:CallbackQuery):
+    await call.message.answer('🏠 Main Menu',reply_markup=main_keyboard(call.from_user.id));await call.answer()
+
+
 # =========================
 # UNKNOWN TEXT
 # =========================
