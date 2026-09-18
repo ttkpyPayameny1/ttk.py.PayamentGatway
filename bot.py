@@ -12,7 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -44,13 +44,19 @@ DEMO_DAILY_RATE = Decimal("0.34")
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# Simple callback deduplication cache (In-Memory)
-PROCESSED_CALLBACKS = set()
+# Simple callback deduplication cache (In-Memory) with timestamp cleaning
+PROCESSED_CALLBACKS = {}
 
-def callback_once(key: str) -> bool:
+def callback_once(key: str, ttl: int = 5) -> bool:
+    now = datetime.now().timestamp()
+    # Clean old entries
+    for k in list(PROCESSED_CALLBACKS.keys()):
+        if now - PROCESSED_CALLBACKS[k] > ttl:
+            del PROCESSED_CALLBACKS[k]
+            
     if key in PROCESSED_CALLBACKS:
         return False
-    PROCESSED_CALLBACKS.add(key)
+    PROCESSED_CALLBACKS[key] = now
     return True
 
 # =========================
@@ -303,6 +309,9 @@ async def deposit_menu(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_(["dep_bkash", "dep_nagad"]))
 async def dep_local_method(call: CallbackQuery, state: FSMContext):
+    if not callback_once(f"dep_meth:{call.from_user.id}:{call.data}"):
+        await call.answer()
+        return
     method = "bKash" if call.data == "dep_bkash" else "Nagad"
     await state.update_data(method=method)
     await state.set_state(DepositState.amount)
@@ -349,6 +358,9 @@ async def dep_local_amount(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "dep_binance")
 async def dep_binance(call: CallbackQuery, state: FSMContext):
+    if not callback_once(f"dep_binance:{call.from_user.id}"):
+        await call.answer()
+        return
     await state.update_data(method="Binance")
     await state.set_state(DepositState.amount)
     await call.message.answer(
@@ -511,6 +523,9 @@ async def withdraw_menu(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_(["wd_bkash", "wd_nagad"]))
 async def wd_method(call: CallbackQuery, state: FSMContext):
+    if not callback_once(f"wd_meth:{call.from_user.id}:{call.data}"):
+        await call.answer()
+        return
     method = "bKash" if call.data == "wd_bkash" else "Nagad"
     await state.update_data(method=method)
     await state.set_state(WithdrawState.account)
@@ -656,6 +671,9 @@ async def referral(message: Message):
 
 @dp.callback_query(F.data == "ref_rules")
 async def ref_rules(call: CallbackQuery):
+    if not callback_once(f"ref_rules:{call.from_user.id}"):
+        await call.answer()
+        return
     await call.message.answer(
         "📋 Referral Rules\n\n"
         "রেফার করা ব্যক্তি ডিপোজিট করলে তার ডিপোজিটের ৫% কমিশন Systems নির্ধারিত নিয়ম অনুযায়ী Referral Balance-এ যোগ হতে পারে।"
@@ -839,6 +857,9 @@ async def bonus_claim(call: CallbackQuery):
 
 @dp.callback_query(F.data == "bonus_history")
 async def bonus_history(call: CallbackQuery):
+    if not callback_once(f"bonus_history:{call.from_user.id}"):
+        await call.answer()
+        return
     con = db()
     cur = con.cursor()
     cur.execute("""
@@ -883,6 +904,9 @@ async def available_plans(message: Message):
 
 @dp.callback_query(F.data.startswith("plan:"))
 async def plan_details(call: CallbackQuery):
+    if not callback_once(f"plan_det:{call.from_user.id}:{call.data}"):
+        await call.answer()
+        return
     plan = call.data.split(":", 1)[1]
     amount = PLANS.get(plan)
     if amount is None:
@@ -911,6 +935,9 @@ async def plan_details(call: CallbackQuery):
 
 @dp.callback_query(F.data == "plans_back")
 async def plans_back(call: CallbackQuery):
+    if not callback_once(f"plans_back:{call.from_user.id}"):
+        await call.answer()
+        return
     await call.message.answer(
         "💎 Available Plans\nএকটি Plan নির্বাচন করুন।",
         reply_markup=plan_keyboard()
@@ -919,7 +946,7 @@ async def plans_back(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_plan(call: CallbackQuery):
-    if not callback_once(f"buy_plan:{call.from_user.id}:{call.data}"):
+    if not callback_once(f"buy_plan:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
     plan = call.data.split(":", 1)[1]
     amount = PLANS.get(plan)
@@ -939,7 +966,7 @@ async def buy_plan(call: CallbackQuery):
             "⚠️ Plan Limit Reached\n"
             f"দুঃখিত! আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌\n\n"
             "📅 এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত একই Plan আর নতুন করে সক্রিয় করতে পারবেন না।\n\n"
-            "💎 তবে অন্যান্য Available Plans থেকে Plan নির্বাচন করতে পারবেন।"
+            "💎 তবে অন্যান্য Available Plans থেকে Plan নির্বাচন করতে পারবেন."
         )
         await call.answer()
         return
@@ -1074,6 +1101,9 @@ async def help_menu(message: Message):
 
 @dp.callback_query(F.data == "help_rules")
 async def help_rules(call: CallbackQuery):
+    if not callback_once(f"help_rules:{call.from_user.id}"):
+        await call.answer()
+        return
     await call.message.answer(
         "🌐 About NIKAN\n\n"
         "NIKAN একটি online earning service demo interface, যেখানে earning features, referral program এবং available plans দেখানো হয়。\n\n"
@@ -1090,7 +1120,7 @@ async def help_rules(call: CallbackQuery):
 # =========================
 @dp.callback_query(F.data.startswith("adm_dep_ok:"))
 async def admin_dep_approve(call: CallbackQuery):
-    if not callback_once(f"admin_dep_approve:{call.from_user.id}:{call.data}"):
+    if not callback_once(f"admin_dep_approve:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
     if call.from_user.id != ADMIN_ID:
         await call.answer("Unauthorized", show_alert=True)
@@ -1142,6 +1172,8 @@ async def admin_dep_approve(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_dep_no:"))
 async def admin_dep_reject(call: CallbackQuery):
+    if not callback_once(f"admin_dep_reject:{call.from_user.id}:{call.data}", ttl=10):
+        return await call.answer("Already processing…", show_alert=True)
     if call.from_user.id != ADMIN_ID:
         await call.answer("Unauthorized", show_alert=True)
         return
@@ -1177,7 +1209,7 @@ async def admin_dep_reject(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_wd_ok:"))
 async def admin_wd_approve(call: CallbackQuery):
-    if not callback_once(f"admin_wd_approve:{call.from_user.id}:{call.data}"):
+    if not callback_once(f"admin_wd_approve:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
     if call.from_user.id != ADMIN_ID:
         await call.answer("Unauthorized", show_alert=True)
@@ -1227,6 +1259,8 @@ async def admin_wd_approve(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_wd_no:"))
 async def admin_wd_reject(call: CallbackQuery):
+    if not callback_once(f"admin_wd_reject:{call.from_user.id}:{call.data}", ttl=10):
+        return await call.answer("Already processing…", show_alert=True)
     if call.from_user.id != ADMIN_ID:
         await call.answer("Unauthorized", show_alert=True)
         return
@@ -1278,6 +1312,9 @@ async def admin_wd_reject(call: CallbackQuery):
 
 @dp.callback_query(F.data == "cancel_inline")
 async def inline_cancel(call: CallbackQuery, state: FSMContext):
+    if not callback_once(f"cancel_inline:{call.from_user.id}"):
+        await call.answer()
+        return
     await state.clear()
     await call.message.answer("❌ বাতিল করা হয়েছে।", reply_markup=main_keyboard())
     await call.answer()
@@ -1917,7 +1954,7 @@ async def x_reject_reason(message: Message, state: FSMContext):
         cur.execute("UPDATE deposits SET status='Rejected',reason=?,updated_at=? WHERE order_no=?", (reason, now_iso(), rid))
         await bot.send_message(
             uid,
-            f"❌ Deposit Failed!\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি।\n📝 Transaction ID: {t}\n🆔 Order No: {rid}\n\n❗ Reject Reason: {reason}\n\n🔄 অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।"
+            f"❌ Deposit Failed!\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি。\n📝 Transaction ID: {t}\n🆔 Order No: {rid}\n\n❗ Reject Reason: {reason}\n\n🔄 অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।"
         )
     else:
         r = cur.execute("SELECT user_id,amount,method,account,status FROM withdrawals WHERE id=?", (int(rid),)).fetchone()
@@ -2007,8 +2044,16 @@ async def x_do_rmadmin(message: Message, state: FSMContext):
 # =========================
 async def main():
     init_db()
-    # Delete webhook to handle polling cleanly
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Set Bot Commands Menu (Basic Commands)
+    commands = [
+        BotCommand(command="start", description="🚀 Start Bot — বট শুরু করুন"),
+        BotCommand(command="menu", description="🏠 Main Menu — প্রধান মেনু"),
+        BotCommand(command="help", description="🆘 Help Center — সাহায্য কেন্দ্র")
+    ]
+    await bot.set_my_commands(commands)
+    
     print("Bot is starting...")
     await dp.start_polling(bot)
 
