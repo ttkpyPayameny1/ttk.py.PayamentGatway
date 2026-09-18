@@ -20,7 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = ""  # আপনার বটের আসল টোকেন এখানে দিন
+BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার বটের আসল টোকেন এখানে দিন
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
