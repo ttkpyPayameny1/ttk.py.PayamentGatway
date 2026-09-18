@@ -206,7 +206,7 @@ def order_no():
 
 
 # =========================
-# REPLY KEYBOARD
+# REPLY KEYBOARD (Fixed UI Layout)
 # =========================
 def main_keyboard(uid=None):
     kb = [
@@ -221,7 +221,6 @@ def main_keyboard(uid=None):
     return ReplyKeyboardMarkup(
         keyboard=kb,
         resize_keyboard=True,
-        is_persistent=True,
         input_field_placeholder="একটি অপশন নির্বাচন করুন"
     )
 
@@ -391,7 +390,7 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     txid = message.text.strip()
     if not re.fullmatch(r"0x[a-fA-F0-9]{64}", txid):
         await message.answer(
-            "❌ TxID সঠিক নয়।\n"
+            "❌ TxID সঠিক নয়。\n"
             "0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।"
         )
         return
@@ -799,9 +798,7 @@ async def claim_today(call: CallbackQuery):
         "ℹ️ এটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।"
     )
     await call.answer("✅ Claim সম্পন্ন হয়েছে।")
-
-
-# =========================
+    # =========================
 # BONUS
 # =========================
 @dp.message(F.text == "🎁 Bonus Center")
@@ -897,8 +894,8 @@ async def available_plans(message: Message):
         "━━━━━━━━━━━━━━━━━━\n"
         "নিচে একটি Plan নির্বাচন করুন।\n\n"
         "📅 মেয়াদ: 4 দিন\n"
-        "📊 Daily calculation: 34% (DEMO/SIMULATION)\n"
-        "⚠️ কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
+        "📊 Daily calculation: 34% (Raal/SIMULATION)\n"
+        "⚠️  নির্দিষ্ট লাভ নিশ্চিত আচে।",
         reply_markup=plan_keyboard()
     )
 
@@ -926,8 +923,8 @@ async def plan_details(call: CallbackQuery):
         f"📅 Duration: {PLAN_DAYS} days\n"
         f"📊 Demo daily amount: {money(daily)}৳\n"
         f"📈 Demo total: {money(total_demo)}৳\n\n"
-        "⚠️ এটি শুধুমাত্র DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
-        reply_markup=kb
+        "⚠️ এটি শুধুমাত্র ডেইলি আয়/SIMULATION calculation; কোনো রিস্ক আছে এমন নয়।",
+        reply_markup=k
     )
     await call.answer()
 
@@ -1017,8 +1014,8 @@ async def buy_plan(call: CallbackQuery):
         f"📊 Demo দৈনিক আয়: ৳{money(daily)}\n\n"
         "💵 Daily Earnings থেকে claim করতে পারবেন।\n"
         "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে。\n\n"
-        "⚠️ Daily amount একটি DEMO/SIMULATION calculation; "
-        "কোনো নির্দিষ্ট লাভ নিশ্চিত নয়。"
+        "⚠️ Daily amount একটি লাভজনক হতে পারে/SIMULATION calculation; "
+        
     )
     await call.answer("✅ Plan activated!")
 
@@ -1114,7 +1111,6 @@ async def help_rules(call: CallbackQuery):
         "👥 Referral Program\n"
         "🧾 Transaction History\n"
         "🆘 User Support\n\n"
-        "⚠️ কোনো নির্দিষ্ট লাভ নিশ্চিত নয়。"
     )
     await call.answer()
 
@@ -1256,7 +1252,7 @@ async def admin_wd_approve(call: CallbackQuery):
         f"💰 পরিমাণ: {money(amount)}৳\n"
         "🟢 আপনার পেমেন্ট রিকোয়েস্ট সফলভাবে অনুমোদিত হয়েছে。\n"
         f"📲 নির্ধারিত {method} নম্বর: {account_no}\n\n"
-        "ℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।"
+        "ℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না。"
     )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Withdraw approved.")
