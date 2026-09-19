@@ -15,11 +15,12 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.enums import ParseMode
 
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার বটের আসল টোকেন এখানে দিন
+BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
@@ -40,10 +41,9 @@ PLANS = {
 PLAN_DAYS = 4
 DEMO_DAILY_RATE = Decimal("0.34")
 
-bot = Bot(BOT_TOKEN)
+bot = Bot(BOT_TOKEN, default=dict(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Simple callback deduplication cache (In-Memory) with timestamp cleaning
 PROCESSED_CALLBACKS = {}
 
 def callback_once(key: str, ttl: int = 5) -> bool:
@@ -51,7 +51,6 @@ def callback_once(key: str, ttl: int = 5) -> bool:
     for k in list(PROCESSED_CALLBACKS.keys()):
         if now - PROCESSED_CALLBACKS[k] > ttl:
             del PROCESSED_CALLBACKS[k]
-            
     if key in PROCESSED_CALLBACKS:
         return False
     PROCESSED_CALLBACKS[key] = now
@@ -80,7 +79,8 @@ def init_db():
         bonus_balance REAL DEFAULT 0,
         referral_balance REAL DEFAULT 0,
         total_earnings REAL DEFAULT 0,
-        created_at TEXT
+        created_at TEXT,
+        referrer_id INTEGER DEFAULT 0
     )""")
 
     cur.execute("""
@@ -162,7 +162,8 @@ def init_db():
         ('referral_count', 'INTEGER', '0'),
         ('completed_tasks', 'INTEGER', '0'),
         ('banned', 'INTEGER', '0'),
-        ('suspended', 'INTEGER', '0')
+        ('suspended', 'INTEGER', '0'),
+        ('referrer_id', 'INTEGER', '0')
     ]:
         if col not in cols:
             cur.execute(f'ALTER TABLE users ADD COLUMN {col} {typ} DEFAULT {default}')
@@ -170,7 +171,19 @@ def init_db():
     con.commit()
     con.close()
 
-def get_user(message: Message):
+def getset(k, default=""):
+    con = db()
+    r = con.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+    con.close()
+    return r[0] if r else default
+
+def setset(k, v):
+    con = db()
+    con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
+    con.commit()
+    con.close()
+
+def get_user(message: Message, referrer_id: int = 0):
     u = message.from_user
     con = db()
     cur = con.cursor()
@@ -178,10 +191,15 @@ def get_user(message: Message):
     row = cur.fetchone()
 
     if not row:
+        ref_to_save = referrer_id if (referrer_id and referrer_id != u.id) else 0
         cur.execute("""
-            INSERT INTO users(user_id,name,username,created_at)
-            VALUES(?,?,?,?)
-        """, (u.id, u.full_name, u.username or "", now_iso()))
+            INSERT INTO users(user_id,name,username,created_at,referrer_id)
+            VALUES(?,?,?,?,?)
+        """, (u.id, u.full_name, u.username or "", now_iso(), ref_to_save))
+        
+        if ref_to_save:
+            cur.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id=?", (ref_to_save,))
+            
         con.commit()
         cur.execute("SELECT * FROM users WHERE user_id=?", (u.id,))
         row = cur.fetchone()
@@ -208,9 +226,6 @@ def money(x):
 def order_no():
     return "RC" + datetime.now().strftime("%Y%m%d%H%M%S%f")[:21]
 
-# =========================
-# KEYBOARDS & ADMIN CHECKS
-# =========================
 def role(uid):
     con = db()
     r = con.execute("SELECT role FROM admins WHERE user_id=?", (uid,)).fetchone()
@@ -253,6 +268,35 @@ def cancel_keyboard():
     )
 
 # =========================
+# FORCE JOIN CHECKER
+# =========================
+async def check_force_join(user_id: int) -> bool:
+    if getset("force_join_enabled") != "1":
+        return True
+    chat = getset("force_join_chat")
+    if not chat:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=chat, user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+    except Exception:
+        pass
+    return False
+
+async def force_join_prompt(message: Message):
+    link = getset("force_join_link") or "https://t.me/"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Join Channel", url=link)],
+        [InlineKeyboardButton(text="✅ Check Joined", callback_data="check_force_join")]
+    ])
+    await message.answer(
+        "<b>🔒 Channel Join Required</b>\n\n"
+        "<b>বটটি ব্যবহার করতে হলে প্রথমে আমাদের অফিসিয়াল চ্যানেলে জয়েন করুন এবং নিচের 'Check Joined' বাটনে ক্লিক করুন।</b>",
+        reply_markup=kb
+    )
+
+# =========================
 # STATES
 # =========================
 class DepositState(StatesGroup):
@@ -289,18 +333,48 @@ class AdvancedAdminState(StatesGroup):
 @dp.message(Command("start"))
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    get_user(message)
     uid = message.from_user.id
+    
+    args = message.text.split()
+    ref_id = 0
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            ref_id = int(args[1].split("_")[1])
+        except ValueError:
+            ref_id = 0
+
+    get_user(message, referrer_id=ref_id)
+
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
+
     await message.answer(
-        "🚀 NIKAN EARN\n\nস্বাগতম! নিচের মেনু থেকে একটি অপশন নির্বাচন করুন।",
+        "<b>🚀 NIKAN EARN</b>\n\n<b>স্বাগতম! নিচের মেনু থেকে একটি অপশন নির্বাচন করুন।</b>",
         reply_markup=main_keyboard(uid)
     )
+
+@dp.callback_query(F.data == "check_force_join")
+async def verify_force_join(call: CallbackQuery):
+    uid = call.from_user.id
+    if await check_force_join(uid):
+        await call.message.delete()
+        await call.message.answer(
+            "<b>✅ ভেরিফিকেশন সফল হয়েছে!</b>\n\n<b>নিচের মেনু থেকে আপনার পছন্দমতো অপশন বেছে নিন।</b>",
+            reply_markup=main_keyboard(uid)
+        )
+    else:
+        await call.answer("❌ আপনি এখনো চ্যানেলে জয়েন করেননি! দয়া করে জয়েন করুন।", show_alert=True)
+    await call.answer()
 
 @dp.message(Command("menu"))
 async def menu(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    await message.answer("🏠 Main Menu\nনিচের মেনু থেকে একটি অপশন নির্বাচন করুন।", reply_markup=main_keyboard(uid))
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
+    await message.answer("<b>🏠 Main Menu</b>\n<b>নিচের মেনু থেকে একটি অপশন নির্বাচন করুন।</b>", reply_markup=main_keyboard(uid))
 
 @dp.message(Command("help"))
 async def help_command(message: Message):
@@ -310,7 +384,7 @@ async def help_command(message: Message):
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    await message.answer("❌ বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।", reply_markup=main_keyboard(uid))
+    await message.answer("<b>❌ বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।</b>", reply_markup=main_keyboard(uid))
 
 # =========================
 # DEPOSIT
@@ -318,14 +392,18 @@ async def cancel(message: Message, state: FSMContext):
 @dp.message(F.text == "🔐 ফান্ড ডিপোজিট")
 async def deposit_menu(message: Message, state: FSMContext):
     await state.clear()
+    uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 বিকাশ", callback_data="dep_bkash"),
          InlineKeyboardButton(text="💠 নগদ", callback_data="dep_nagad")],
         [InlineKeyboardButton(text="🟡 Binance", callback_data="dep_binance")],
     ])
     await message.answer(
-        "🔐 ফান্ড ডিপোজিট\n━━━━━━━━━━━━━━━━━━\n"
-        "নিচের অপশন থেকে একটি মেথড নির্বাচন করুন।",
+        "<b>🔐 ফান্ড ডিপোজিট</b>\n━━━━━━━━━━━━━━━━━━\n"
+        "<b>নিচের অপশন থেকে একটি মেথড নির্বাচন করুন।</b>",
         reply_markup=kb
     )
 
@@ -338,11 +416,11 @@ async def dep_local_method(call: CallbackQuery, state: FSMContext):
     await state.update_data(method=method)
     await state.set_state(DepositState.amount)
     await call.message.answer(
-        f"💳 {method} Deposit\n\n"
-        "📊 ডিপোজিট লিমিট: 0/3\n"
-        "💰 সর্বনিম্ন: 50৳\n"
-        "💰 সর্বোচ্চ: 10,000৳\n\n"
-        "👉 কত টাকা ডিপোজিট করতে চান? সংখ্যায় লিখুন।",
+        f"<b>💳 {method} Deposit</b>\n\n"
+        "<b>📊 ডিপোজিট লিমিট: 0/3</b>\n"
+        "<b>💰 সর্বনিম্ন: 50৳</b>\n"
+        "<b>💰 সর্বোচ্চ: 10,000৳</b>\n\n"
+        "<b>👉 কত টাকা ডিপোজিট করতে চান? সংখ্যায় লিখুন।</b>",
         reply_markup=cancel_keyboard()
     )
     await call.answer()
@@ -355,10 +433,10 @@ async def dep_binance(call: CallbackQuery, state: FSMContext):
     await state.update_data(method="Binance")
     await state.set_state(DepositState.amount)
     await call.message.answer(
-        "🟡 Binance — USDT Deposit\n\n"
-        "💵 সর্বনিম্ন: $1\n"
-        "💵 সর্বোচ্চ: $50\n\n"
-        "👉 কত USDT ডিপোজিট করবেন? লিখুন।",
+        "<b>🟡 Binance — USDT Deposit</b>\n\n"
+        "<b>💵 সর্বনিম্ন: $1</b>\n"
+        "<b>💵 সর্বোচ্চ: $50</b>\n\n"
+        "<b>👉 কত USDT ডিপোজিট করবেন? লিখুন।</b>",
         reply_markup=cancel_keyboard()
     )
     await call.answer()
@@ -367,7 +445,6 @@ async def dep_binance(call: CallbackQuery, state: FSMContext):
 async def dep_amount_router(message: Message, state: FSMContext):
     data = await state.get_data()
     method = data.get("method")
-    
     if method == "Binance":
         await dep_binance_amount(message, state)
     else:
@@ -377,18 +454,17 @@ async def dep_local_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal(message.text.strip())
     except (InvalidOperation, AttributeError):
-        await message.answer("❌ সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।")
+        await message.answer("<b>❌ সঠিক সংখ্যায় ডিপোজিট এমাউন্ট লিখুন।</b>")
         return
 
     if amount < 50 or amount > 10000:
-        await message.answer("⚠️ ডিপোজিটের পরিমাণ 50৳ থেকে 10,000৳ এর মধ্যে হতে হবে।")
+        await message.answer("<b>⚠️ ডিপোজিটের পরিমাণ 50৳ থেকে 10,000৳ এর মধ্যে হতে হবে।</b>")
         return
 
     data = await state.get_data()
     method = data.get("method")
     user_id = message.from_user.id
 
-    # ডায়নামিক পেমেন্ট গেটওয়ে লিংক যেখানে অ্যামাউন্ট এবং ইউজার আইডি পাস করা হয়েছে
     payment_url = f"{PAYMENT_GATEWAY_URL}/?amount={amount}&user_id={user_id}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -396,9 +472,9 @@ async def dep_local_amount(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
     ])
     await message.answer(
-        f"💰 ডিপোজিট এমাউন্ট: {money(amount)}৳\n\n"
-        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।\n\n"
-        f"💳 Method: {method}",
+        f"<b>💰 ডিপোজিট এমাউন্ট: {money(amount)}৳</b>\n\n"
+        "<b>আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।</b>\n\n"
+        f"<b>💳 Method: {method}</b>",
         reply_markup=kb
     )
     await state.clear()
@@ -407,11 +483,11 @@ async def dep_binance_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal(message.text.strip())
     except (InvalidOperation, AttributeError):
-        await message.answer("❌ সঠিক USDT পরিমাণ লিখুন।")
+        await message.answer("<b>❌ সঠিক USDT পরিমাণ লিখুন।</b>")
         return
 
     if amount < 1 or amount > 50:
-        await message.answer("⚠️ USDT পরিমাণ $1 থেকে $50 এর মধ্যে হতে হবে।")
+        await message.answer("<b>⚠️ USDT পরিমাণ $1 থেকে $50 এর মধ্যে হতে হবে।</b>")
         return
 
     await state.update_data(usdt=amount)
@@ -419,15 +495,14 @@ async def dep_binance_amount(message: Message, state: FSMContext):
 
     bdt = amount * USDT_RATE_BDT
     await message.answer(
-        "🟡 USDT — BEP20 ডিপোজিট\n"
+        "<b>🟡 USDT — BEP20 ডিপোজিট</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💱 ডিপোজিট রেট: 1 USDT = {money(USDT_RATE_BDT)}৳\n"
-        f"💰 আপনার পরিমাণ: {money(amount)} USDT\n"
-        f"💵 ব্যালেন্সে যোগ হবে: {money(bdt)}৳\n\n"
-        "📌 BEP20 / BSC নেটওয়ার্ক ব্যবহার করে নিচের ঠিকানায় USDT পাঠান:\n\n"
-        f"`{BINANCE_DEPOSIT_ADDRESS}`\n\n"
-        "📝 পেমেন্ট করার পর TxID / Transaction Hash পাঠান।",
-        parse_mode="Markdown",
+        f"<b>💱 ডিপোজিট রেট: 1 USDT = {money(USDT_RATE_BDT)}৳</b>\n"
+        f"<b>💰 আপনার পরিমাণ: {money(amount)} USDT</b>\n"
+        f"<b>💵 ব্যালেন্সে যোগ হবে: {money(bdt)}৳</b>\n\n"
+        "<b>📌 BEP20 / BSC নেটওয়ার্ক ব্যবহার করে নিচের ঠিকানায় USDT পাঠান:</b>\n\n"
+        f"<code>{BINANCE_DEPOSIT_ADDRESS}</code>\n\n"
+        "<b>📝 পেমেন্ট করার পর TxID / Transaction Hash পাঠান।</b>",
         reply_markup=cancel_keyboard()
     )
 
@@ -436,8 +511,8 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     txid = message.text.strip()
     if not re.fullmatch(r"0x[a-fA-F0-9]{64}", txid):
         await message.answer(
-            "❌ TxID সঠিক নয়。\n"
-            "0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।"
+            "<b>❌ TxID সঠিক নয়।</b>\n"
+            "<b>0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।</b>"
         )
         return
 
@@ -457,8 +532,8 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     await message.answer(
-        "✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে。\n"
-        "⏳ অনুমোদনের জন্য অপেক্ষা করুন।",
+        "<b>✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে।</b>\n"
+        "<b>⏳ অনুমোদনের জন্য অপেক্ষা করুন।</b>",
         reply_markup=main_keyboard(uid)
     )
 
@@ -474,16 +549,16 @@ async def send_admin_deposit(user, method, amount, txid, oid):
     username = f"@{user.username}" if user.username else "—"
     await bot.send_message(
         ADMIN_ID,
-        "📥 NEW DEPOSIT REQUEST\n"
+        "<b>📥 NEW DEPOSIT REQUEST</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"👤 নাম: {user.full_name}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user.id}\n"
-        f"💳 Method: {method}\n"
-        f"💰 Amount: {money(amount)}৳\n"
-        f"📝 TxID: {txid}\n"
-        f"🆔 Order No: {oid}\n"
-        "📌 Status: Pending",
+        f"<b>👤 নাম: {user.full_name}</b>\n"
+        f"<b>🔗 Username: {username}</b>\n"
+        f"<b>🆔 User ID: {user.id}</b>\n"
+        f"<b>💳 Method: {method}</b>\n"
+        f"<b>💰 Amount: {money(amount)}৳</b>\n"
+        f"<b>📝 TxID: {txid}</b>\n"
+        f"<b>🆔 Order No: {oid}</b>\n"
+        "<b>📌 Status: Pending</b>",
         reply_markup=kb
     )
 
@@ -492,8 +567,12 @@ async def send_admin_deposit(user, method, amount, txid, oid):
 # =========================
 @dp.message(F.text == "👤 একাউন্ট")
 async def account(message: Message):
+    uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     row = get_user(message)
-    uid, name, username, main, deposit, bonus, referral, total, created = row[:9]
+    uid, name, username, main, deposit, bonus, referral, total, created, referrer_id = row[:10]
 
     con = db()
     cur = con.cursor()
@@ -518,32 +597,36 @@ async def account(message: Message):
             vip2 = f"{days} দিন"
 
     await message.answer(
-        "👤 আমার অ্যাকাউন্টের তথ্য\n"
+        "<b>👤 আমার অ্যাকাউন্টের তথ্য</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 ব্যবহারকারীর নাম: {name}\n"
-        f"🔗 ইউজারনেম: @{username if username else 'নেই'}\n"
-        f"🆔 ইউজার আইডি: {uid}\n"
+        f"<b>👤 ব্যবহারকারীর নাম: {name}</b>\n"
+        f"<b>🔗 ইউজারনেম: @{username if username else 'নেই'}</b>\n"
+        f"<b>🆔 ইউজার আইডি: {uid}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💰 BALANCE DETAILS\n"
+        "<b>💰 BALANCE DETAILS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 মোট ব্যালেন্স: {money(main)}৳\n"
-        f"📥 ডিপোজিট ব্যালেন্স: {money(deposit)}৳\n"
-        f"🎁 ডিপোজিট বোনাস: {money(bonus)}৳\n"
-        f"🫂 রেফার ব্যালেন্স: {money(referral)}৳\n"
+        f"<b>💵 মোট ব্যালেন্স: {money(main)}৳</b>\n"
+        f"<b>📥 ডিপোজিট ব্যালেন্স: {money(deposit)}৳</b>\n"
+        f"<b>🎁 ডিপোজিট বোনাস: {money(bonus)}৳</b>\n"
+        f"<b>🫂 রেফার ব্যালেন্স: {money(referral)}৳</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👑 ACCOUNT STATUS\n"
+        "<b>👑 ACCOUNT STATUS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⏳ Plan এর মেয়াদ:\n"
-        f"• VIP 1 — {vip1}\n"
-        f"• VIP 2 — {vip2}\n"
-        "🚫 নিষিদ্ধ: না\n"
+        "<b>⏳ Plan এর মেয়াদ:</b>\n"
+        f"<b>• VIP 1 — {vip1}</b>\n"
+        f"<b>• VIP 2 — {vip2}</b>\n"
+        "<b>🚫 নিষিদ্ধ: না</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ আপনার অ্যাকাউন্টের সকল তথ্য এখানে দেখানো হয়েছে।"
+        "<b>✨ আপনার অ্যাকাউন্টের সকল তথ্য এখানে দেখানো হয়েছে।</b>"
     )
 
 @dp.message(F.text == "💸 Withdraw")
 async def withdraw_menu(message: Message, state: FSMContext):
     await state.clear()
+    uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💳 bKash", callback_data="wd_bkash"),
@@ -551,7 +634,7 @@ async def withdraw_menu(message: Message, state: FSMContext):
         ],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
     ])
-    await message.answer("💸 Withdraw\n\nএকটি পেমেন্ট মেথড নির্বাচন করুন।", reply_markup=kb)
+    await message.answer("<b>💸 Withdraw</b>\n\n<b>একটি পেমেন্ট মেথড নির্বাচন করুন।</b>", reply_markup=kb)
 
 @dp.callback_query(F.data.in_(["wd_bkash", "wd_nagad"]))
 async def wd_method(call: CallbackQuery, state: FSMContext):
@@ -562,9 +645,9 @@ async def wd_method(call: CallbackQuery, state: FSMContext):
     await state.update_data(method=method)
     await state.set_state(WithdrawState.account)
     await call.message.answer(
-        f"📲 {method}\n\n"
-        "আপনার সঠিক ১১ ডিজিটের নম্বরটি লিখুন。\n"
-        "উদাহরণ: 017XXXXXXXX",
+        f"<b>📲 {method}</b>\n\n"
+        "<b>আপনার সঠিক ১১ ডিজিটের নম্বরটি লিখুন।</b>\n"
+        "<b>উদাহরণ: 017XXXXXXXX</b>",
         reply_markup=cancel_keyboard()
     )
     await call.answer()
@@ -573,7 +656,7 @@ async def wd_method(call: CallbackQuery, state: FSMContext):
 async def wd_account(message: Message, state: FSMContext):
     account_no = message.text.strip()
     if not re.fullmatch(r"01[3-9]\d{8}", account_no):
-        await message.answer("❌ সঠিক ১১ ডিজিটের মোবাইল নম্বর দিন।")
+        await message.answer("<b>❌ সঠিক ১১ ডিজিটের মোবাইল নম্বর দিন।</b>")
         return
 
     await state.update_data(account=account_no)
@@ -583,12 +666,12 @@ async def wd_account(message: Message, state: FSMContext):
     balance = Decimal(str(row[3]))
 
     await message.answer(
-        f"💰 আপনার বর্তমান ব্যালেন্স: {money(balance)}৳\n\n"
-        "📌 উইথড্র সীমা:\n"
-        "• সর্বনিম্ন: 100৳\n"
-        "• সর্বোচ্চ: 25,000৳\n\n"
-        f"📲 নম্বর: {account_no}\n\n"
-        "👉 কত টাকা উইথড্র করতে চান? সংখ্যায় লিখুন।",
+        f"<b>💰 আপনার বর্তমান ব্যালেন্স: {money(balance)}৳</b>\n\n"
+        "<b>📌 উইথড্র সীমা:</b>\n"
+        "<b>• সর্বনিম্ন: 100৳</b>\n"
+        "<b>• সর্বোচ্চ: 25,000৳</b>\n\n"
+        f"<b>📲 নম্বর: {account_no}</b>\n\n"
+        "<b>👉 কত টাকা উইথড্র করতে চান? সংখ্যায় লিখুন।</b>",
         reply_markup=cancel_keyboard()
     )
 
@@ -597,7 +680,7 @@ async def wd_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal(message.text.strip())
     except (InvalidOperation, AttributeError):
-        await message.answer("❌ সঠিক পরিমাণ লিখুন।")
+        await message.answer("<b>❌ সঠিক পরিমাণ লিখুন।</b>")
         return
 
     row = get_user(message)
@@ -605,12 +688,12 @@ async def wd_amount(message: Message, state: FSMContext):
 
     if amount < 100 or amount > 25000 or amount > balance:
         await message.answer(
-            "⚠️ উইথড্র পরিমাণ সঠিক নয়!\n"
-            "💰 উইথড্র করার সীমা:\n"
-            "• সর্বনিম্ন — 100৳\n"
-            "• সর্বোচ্চ — 25,000৳\n"
-            f"আপনার বর্তমান ব্যালেন্স {money(balance)}৳\n\n"
-            "👉 অনুগ্রহ করে সঠিক পরিমাণ লিখে আবার চেষ্টা করুন।",
+            "<b>⚠️ উইথড্র পরিমাণ সঠিক নয়!</b>\n"
+            "<b>💰 উইথড্র করার সীমা:</b>\n"
+            "<b>• সর্বনিম্ন — 100৳</b>\n"
+            "<b>• সর্বোচ্চ — 25,000৳</b>\n"
+            f"<b>আপনার বর্তমান ব্যালেন্স {money(balance)}৳</b>\n\n"
+            "<b>👉 অনুগ্রহ করে সঠিক পরিমাণ লিখে আবার চেষ্টা করুন।</b>",
             reply_markup=cancel_keyboard()
         )
         return
@@ -627,7 +710,7 @@ async def wd_amount(message: Message, state: FSMContext):
     if cur.rowcount != 1:
         con.rollback()
         con.close()
-        await message.answer("❌ ব্যালেন্স পরিবর্তিত হয়েছে। আবার চেষ্টা করুন।")
+        await message.answer("<b>❌ ব্যালেন্স পরিবর্তিত হয়েছে। আবার চেষ্টা করুন।</b>")
         return
 
     cur.execute("""
@@ -641,9 +724,9 @@ async def wd_amount(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     await message.answer(
-        f"✅ আপনার 💸 {money(amount)}৳ উইথড্র রিকোয়েস্ট সফলভাবে জমা হয়েছে!\n\n"
-        "⏳ প্রসেসিং সময়: Admin review\n"
-        "অনুমোদন সম্পন্ন হওয়া পর্যন্ত অপেক্ষা করুন।",
+        f"<b>✅ আপনার 💸 {money(amount)}৳ উইথড্র রিকোয়েস্ট সফলভাবে জমা হয়েছে!</b>\n\n"
+        "<b>⏳ প্রসেসিং সময়: Admin review</b>\n"
+        "<b>অনুমোদন সম্পন্ন হওয়া পর্যন্ত অপেক্ষা করুন।</b>",
         reply_markup=main_keyboard(uid)
     )
 
@@ -659,16 +742,16 @@ async def send_admin_withdraw(user, wid, method, account_no, amount):
     ])
     await bot.send_message(
         ADMIN_ID,
-        "📤 NEW WITHDRAW REQUEST\n"
+        "<b>📤 NEW WITHDRAW REQUEST</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"👤 নাম: {user.full_name}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user.id}\n"
-        f"💳 Method: {method}\n"
-        f"📲 Account: {account_no}\n"
-        f"💰 Amount: {money(amount)}৳\n"
-        f"🆔 Request ID: {wid}\n"
-        "📌 Status: Pending",
+        f"<b>👤 নাম: {user.full_name}</b>\n"
+        f"<b>🔗 Username: {username}</b>\n"
+        f"<b>🆔 User ID: {user.id}</b>\n"
+        f"<b>💳 Method: {method}</b>\n"
+        f"<b>📲 Account: {account_no}</b>\n"
+        f"<b>💰 Amount: {money(amount)}৳</b>\n"
+        f"<b>🆔 Request ID: {wid}</b>\n"
+        "<b>📌 Status: Pending</b>",
         reply_markup=kb
     )
 
@@ -678,12 +761,16 @@ async def send_admin_withdraw(user, wid, method, account_no, amount):
 @dp.message(F.text == "👥 Referral")
 async def referral(message: Message):
     uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     con = db()
     cur = con.cursor()
-    cur.execute("SELECT referral_balance FROM users WHERE user_id=?", (uid,))
+    cur.execute("SELECT referral_balance, referral_count FROM users WHERE user_id=?", (uid,))
     row = cur.fetchone()
     con.close()
     refbal = row[0] if row else 0
+    refcount = row[1] if row else 0
 
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{uid}"
@@ -693,12 +780,12 @@ async def referral(message: Message):
         [InlineKeyboardButton(text="📋 Rules", callback_data="ref_rules")]
     ])
     await message.answer(
-        "👥 Referral Center\n"
+        "<b>👥 Referral Center</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"🔗 আপনার Referral Link:\n{link}\n\n"
-        "👥 মোট referrals: 0\n"
-        f"💰 Referral earnings: {money(refbal)}৳\n\n"
-        "📌 রেফার করা ব্যক্তি ডিপোজিট করলে, প্রযোজ্য শর্ত অনুযায়ী তার ডিপোজিট থেকে ৫% কমিশন গণনা করা যেতে পারে।",
+        f"<b>🔗 আপনার Referral Link:</b>\n<code>{link}</code>\n\n"
+        f"<b>👥 মোট referrals: {refcount}</b>\n"
+        f"<b>💰 Referral earnings: {money(refbal)}৳</b>\n\n"
+        "<b>📌 রেফার করা ব্যক্তি ডিপোজিট করলে, প্রযোজ্য শর্ত অনুযায়ী কমিশন গণনা করা হবে।</b>",
         reply_markup=kb
     )
 
@@ -708,14 +795,17 @@ async def ref_rules(call: CallbackQuery):
         await call.answer()
         return
     await call.message.answer(
-        "📋 Referral Rules\n\n"
-        "রেফার করা ব্যক্তি ডিপোজিট করলে তার ডিপোজিটের ৫% কমিশন Systems নির্ধারিত নিয়ম অনুযায়ী Referral Balance-এ যোগ হতে পারে।"
+        "<b>📋 Referral Rules</b>\n\n"
+        "<b>রেফার করা ব্যক্তি ডিপোজিট করলে নির্ধারিত নিয়মে Referral Balance-এ কমিশন যোগ হতে পারে।</b>"
     )
     await call.answer()
 
 @dp.message(F.text == "📊 Daily Earnings")
 async def daily_earnings(message: Message):
     uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     con = db()
     cur = con.cursor()
     cur.execute("""
@@ -726,7 +816,7 @@ async def daily_earnings(message: Message):
     con.close()
 
     now = datetime.now(timezone.utc)
-    lines = ["📊 Daily Earnings", "━━━━━━━━━━━━━━━━━━"]
+    lines = ["<b>📊 Daily Earnings</b>", "━━━━━━━━━━━━━━━━━━"]
     valid = []
 
     for pid, plan, amount, activated, expires, last_claim in plans:
@@ -745,18 +835,18 @@ async def daily_earnings(message: Message):
         daily = Decimal(str(amount)) * DEMO_DAILY_RATE
         valid.append((pid, plan, amount, daily, last_claim))
         lines.append(
-            f"💎 {plan} — {money(amount)}৳\n"
-            f"📅 মেয়াদ শেষ: {exp.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            f"📊 Demo daily amount: {money(daily)}৳\n"
+            f"<b>💎 {plan} — {money(amount)}৳</b>\n"
+            f"<b>📅 মেয়াদ শেষ: {exp.strftime('%Y-%m-%d %H:%M UTC')}</b>\n"
+            f"<b>📊 Demo daily amount: {money(daily)}৳</b>\n"
         )
 
     if not valid:
-        lines.append("❌ কোনো active plan নেই।")
+        lines.append("<b>❌ কোনো active plan নেই।</b>")
         await message.answer("\n".join(lines))
         return
 
-    lines.append("🕗 Claim window: 08:00–24:00")
-    lines.append("⚠️ Claim না করলে ওই দিনের amount পরের দিনে carry হবে না।")
+    lines.append("<b>🕗 Claim window: 08:00–24:00</b>")
+    lines.append("<b>⚠️ Claim না করলে ওই দিনের amount পরের দিনে carry হবে না।</b>")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧮 Today Earnings Claim", callback_data="claim_today")]
@@ -830,17 +920,20 @@ async def claim_today(call: CallbackQuery):
         return
 
     await call.message.answer(
-        "🎉 Today Earnings Claim Successful\n"
+        "<b>🎉 Today Earnings Claim Successful</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 মোট যোগ হয়েছে: {money(total)}৳\n"
-        f"📦 Active plans claimed: {len(claimed)}\n\n"
-        "ℹ️ এটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।"
+        f"<b>💰 মোট যোগ হয়েছে: {money(total)}৳</b>\n"
+        f"<b>📦 Active plans claimed: {len(claimed)}</b>\n\n"
+        "<b>ℹ️ এটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।</b>"
     )
     await call.answer("✅ Claim সম্পন্ন হয়েছে।")
 
 @dp.message(F.text == "🎁 Bonus Center")
 async def bonus_center(message: Message):
     uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     con = db()
     cur = con.cursor()
     cur.execute("SELECT bonus_balance FROM users WHERE user_id=?", (uid,))
@@ -852,12 +945,11 @@ async def bonus_center(message: Message):
         [InlineKeyboardButton(text="📜 Bonus History", callback_data="bonus_history")]
     ])
     await message.answer(
-        "🎁 Bonus Center\n"
+        "<b>🎁 Bonus Center</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Available Bonus: {money(bal)}৳\n"
-        "🎁 Active Rewards: Daily Free 5৳\n\n"
-        "📌 Bonus Balance সরাসরি withdraw বা plan purchase-এর জন্য ব্যবহার করা যাবে না。\n"
-        "Admin নির্ধারিত শর্তে Bonus Balance Main Balance-এ convert করতে পারে।",
+        f"<b>💰 Available Bonus: {money(bal)}৳</b>\n"
+        "<b>🎁 Active Rewards: Daily Free 5৳</b>\n\n"
+        "<b>📌 Bonus Balance সরাসরি withdraw করা যাবে না।</b>",
         reply_markup=kb
     )
 
@@ -885,7 +977,7 @@ async def bonus_claim(call: CallbackQuery):
     con.commit()
     con.close()
 
-    await call.message.answer("🎁 আজকের 5৳ Bonus আপনার Bonus Balance-এ যোগ হয়েছে।")
+    await call.message.answer("<b>🎁 আজকের 5৳ Bonus আপনার Bonus Balance-এ যোগ হয়েছে।</b>")
     await call.answer("✅ Bonus claimed!")
 
 @dp.callback_query(F.data == "bonus_history")
@@ -903,11 +995,11 @@ async def bonus_history(call: CallbackQuery):
     con.close()
 
     if not rows:
-        text = "📜 Bonus History\n\nকোনো bonus history পাওয়া যায়নি।"
+        text = "<b>📜 Bonus History</b>\n\n<b>কোনো bonus history পাওয়া যায়নি।</b>"
     else:
-        text = "📜 Bonus History\n━━━━━━━━━━━━━━━━━━\n"
+        text = "<b>📜 Bonus History</b>\n━━━━━━━━━━━━━━━━━━\n"
         for amount, typ, created in rows:
-            text += f"🎁 +{money(amount)}৳ — {typ}\n📅 {created[:10]}\n\n"
+            text += f"<b>🎁 +{money(amount)}৳ — {typ}</b>\n<b>📅 {created[:10]}</b>\n\n"
 
     await call.message.answer(text)
     await call.answer()
@@ -925,13 +1017,16 @@ def plan_keyboard():
 
 @dp.message(F.text == "💎 Available Plans")
 async def available_plans(message: Message):
+    uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     await message.answer(
-        "💎 Available Plans\n"
+        "<b>💎 Available Plans</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "নিচে একটি Plan নির্বাচন করুন。\n\n"
-        "📅 মেয়াদ: 4 দিন\n"
-        "📊 Daily calculation: 34% (DEMO/SIMULATION)\n"
-        "⚠️ কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
+        "<b>নিচে একটি Plan নির্বাচন করুন।</b>\n\n"
+        "<b>📅 মেয়াদ: 4 দিন</b>\n"
+        "<b>📊 Daily calculation: 34% (DEMO/SIMULATION)</b>",
         reply_markup=plan_keyboard()
     )
 
@@ -955,13 +1050,13 @@ async def plan_details(call: CallbackQuery):
     ])
 
     await call.message.answer(
-        f"💼 {plan} Plan Details\n"
+        f"<b>💼 {plan} Plan Details</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Amount: {amount}৳\n"
-        f"📅 Duration: {PLAN_DAYS} days\n"
-        f"📊 Demo daily amount: {money(daily)}৳\n"
-        f"📈 Demo total: {money(total_demo)}৳\n\n"
-        "⚠️ এটি শুধুমাত্র DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়。",
+        f"<b>💰 Amount: {amount}৳</b>\n"
+        f"<b>📅 Duration: {PLAN_DAYS} days</b>\n"
+        f"<b>📊 Demo daily amount: {money(daily)}৳</b>\n"
+        f"<b>📈 Demo total: {money(total_demo)}৳</b>\n\n"
+        "<b>⚠️ এটি শুধুমাত্র DEMO/SIMULATION calculation।</b>",
         reply_markup=kb
     )
     await call.answer()
@@ -972,7 +1067,7 @@ async def plans_back(call: CallbackQuery):
         await call.answer()
         return
     await call.message.answer(
-        "💎 Available Plans\nএকটি Plan নির্বাচন করুন।",
+        "<b>💎 Available Plans</b>\n<b>একটি Plan নির্বাচন করুন।</b>",
         reply_markup=plan_keyboard()
     )
     await call.answer()
@@ -996,10 +1091,8 @@ async def buy_plan(call: CallbackQuery):
     if active_count >= 2:
         con.close()
         await call.message.answer(
-            "⚠️ Plan Limit Reached\n"
-            f"দুঃখিত! আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌\n\n"
-            "📅 এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত একই Plan আর নতুন করে সক্রিয় করতে পারবেন না。\n\n"
-            "💎 তবে অন্যান্য Available Plans থেকে Plan নির্বাচন করতে পারবেন."
+            "<b>⚠️ Plan Limit Reached</b>\n"
+            f"<b>আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌</b>"
         )
         await call.answer()
         return
@@ -1015,8 +1108,7 @@ async def buy_plan(call: CallbackQuery):
     if available < amount:
         con.close()
         await call.message.answer(
-            "❌ আপনার ডিপোজিট ও মেইন balance এ পর্যাপ্ত টাকা নেই।\n"
-            "দয়া করে আগে যোগ করুন, পরে আবার চেষ্টা করুন। ধন্যবাদ। ❤️"
+            "<b>❌ আপনার ডিপোজিট ও মেইন balance এ পর্যাপ্ত টাকা নেই।</b>"
         )
         await call.answer()
         return
@@ -1046,15 +1138,12 @@ async def buy_plan(call: CallbackQuery):
     daily = Decimal(str(amount)) * DEMO_DAILY_RATE
 
     await call.message.answer(
-        f"🎊 অভিনন্দন! আপনার {plan} Plan সফলভাবে সক্রিয় হয়েছে। ✅\n"
+        f"<b>🎊 অভিনন্দন! আপনার {plan} Plan সফলভাবে সক্রিয় হয়েছে। ✅</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💎 Plan: {plan}\n"
-        f"💰 বিনিয়োগ: ৳{amount}\n"
-        f"📅 মেয়াদ: {PLAN_DAYS} দিন\n"
-        f"📊 Demo দৈনিক আয়: ৳{money(daily)}\n\n"
-        "💵 Daily Earnings থেকে claim করতে পারবেন।\n"
-        "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে。\n\n"
-        "⚠️ Daily amount একটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।"
+        f"<b>💎 Plan: {plan}</b>\n"
+        f"<b>💰 বিনিয়োগ: ৳{amount}</b>\n"
+        f"<b>📅 মেয়াদ: {PLAN_DAYS} দিন</b>\n"
+        f"<b>📊 Demo দৈনিক আয়: ৳{money(daily)}</b>"
     )
     await call.answer("✅ Plan activated!")
 
@@ -1064,6 +1153,9 @@ async def buy_plan(call: CallbackQuery):
 @dp.message(F.text == "🧾 Transaction History")
 async def transaction_history(message: Message):
     uid = message.from_user.id
+    if not await check_force_join(uid):
+        await force_join_prompt(message)
+        return
     con = db()
     cur = con.cursor()
 
@@ -1086,27 +1178,26 @@ async def transaction_history(message: Message):
     earns = cur.fetchall()
     con.close()
 
-    text = "🧾 Transaction History\n━━━━━━━━━━━━━━━━━━\n\n"
-    text += "📥 Deposit History\n"
+    text = "<b>🧾 Transaction History</b>\n━━━━━━━━━━━━━━━━━━\n\n<b>📥 Deposit History</b>\n"
     if deps:
         for method, amount, status, oid, created in deps:
-            text += f"• {method} — {money(amount)}৳ — {status}\n  🆔 {oid}\n"
+            text += f"<b>• {method} — {money(amount)}৳ — {status}</b>\n  <b>🆔 {oid}</b>\n"
     else:
-        text += "• কোনো রেকর্ড নেই\n"
+        text += "<b>• কোনো রেকর্ড নেই</b>\n"
 
-    text += "\n📤 Withdraw History\n"
+    text += "\n<b>📤 Withdraw History</b>\n"
     if wds:
         for method, amount, status, created in wds:
-            text += f"• {method} — {money(amount)}৳ — {status}\n"
+            text += f"<b>• {method} — {money(amount)}৳ — {status}</b>\n"
     else:
-        text += "• কোনো রেকর্ড নেই\n"
+        text += "<b>• কোনো রেকর্ড নেই</b>\n"
 
-    text += "\n📊 Earnings History\n"
+    text += "\n<b>📊 Earnings History</b>\n"
     if earns:
         for amount, claim_date, created in earns:
-            text += f"• +{money(amount)}৳ — {claim_date}\n"
+            text += f"<b>• +{money(amount)}৳ — {claim_date}</b>\n"
     else:
-        text += "• কোনো রেকর্ড নেই\n"
+        text += "<b>• কোনো রেকর্ড নেই</b>\n"
 
     await message.answer(text)
 
@@ -1117,14 +1208,11 @@ async def show_help(message: Message):
         [InlineKeyboardButton(text="📋 Rules", callback_data="help_rules")]
     ])
     await message.answer(
-        "🆘 Help & Support\n"
+        "<b>🆘 Help & Support</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Account Problem\n"
-        "Deposit Problem\n"
-        "Withdraw Problem\n"
-        "Referral Problem\n"
-        "Other Issues\n\n"
-        "🕐 Support Hours: Available as stated by the service.",
+        "<b>Account Problem</b>\n"
+        "<b>Deposit Problem</b>\n"
+        "<b>Withdraw Problem</b>",
         reply_markup=kb
     )
 
@@ -1138,18 +1226,13 @@ async def help_rules(call: CallbackQuery):
         await call.answer()
         return
     await call.message.answer(
-        "🌐 About NIKAN\n\n"
-        "NIKAN একটি online earning service demo interface, যেখানে earning features, referral program এবং available plans দেখানো হয়。\n\n"
-        "📊 Track Your Earnings\n"
-        "👥 Referral Program\n"
-        "🧾 Transaction History\n"
-        "🆘 User Support\n\n"
-        "⚠️ কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।"
+        "<b>🌐 About NIKAN</b>\n\n"
+        "<b>NIKAN একটি online earning service demo interface।</b>"
     )
     await call.answer()
 
 # =========================
-# ADMIN DEPOSIT & WITHDRAW MANAGEMENT
+# ADMIN CALLBACKS & PANEL
 # =========================
 @dp.callback_query(F.data.startswith("adm_dep_ok:"))
 async def admin_dep_approve(call: CallbackQuery):
@@ -1190,15 +1273,12 @@ async def admin_dep_approve(call: CallbackQuery):
 
     await bot.send_message(
         uid,
-        "🎉 Deposit Successful!\n\n"
-        f"আপনার {money(amount)} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅\n"
+        "<b>🎉 Deposit Successful!</b>\n\n"
+        f"<b>আপনার {money(amount)} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Deposit Amount: {money(amount)} BDT\n"
-        f"📝 Transaction ID: {txid}\n"
-        f"🆔 Order Number: {oid}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"💳 আপনার মূল ডিপোজিট ব্যালেন্সে {money(amount)} BDT যোগ করা হয়েছে।\n"
-        "ধন্যবাদ। ❤️"
+        f"<b>💰 Deposit Amount: {money(amount)} BDT</b>\n"
+        f"<b>📝 Transaction ID: {txid}</b>\n"
+        f"<b>🆔 Order Number: {oid}</b>"
     )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Deposit approved.")
@@ -1231,11 +1311,8 @@ async def admin_dep_reject(call: CallbackQuery):
 
     await bot.send_message(
         uid,
-        "❌ Deposit Failed!\n\n"
-        "আপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি。\n\n"
-        f"📝 Transaction ID: {txid}\n"
-        f"🆔 Order No: {oid}\n\n"
-        "🔄 অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন। পেমেন্ট সম্পন্ন না করে থাকলে আগে পেমেন্ট সম্পন্ন করুন।"
+        "<b>❌ Deposit Failed!</b>\n\n"
+        "<b>আপনার দেওয়া Transaction ID সঠিক নয় অথবা পেমেন্ট শনাক্ত করা যায়নি।</b>"
     )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Deposit rejected.")
@@ -1280,12 +1357,10 @@ async def admin_wd_approve(call: CallbackQuery):
 
     await bot.send_message(
         uid,
-        "🎊 উইথড্র কনফার্মড!\n"
+        "<b>🎊 উইথড্র কনফার্মড!</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 পরিমাণ: {money(amount)}৳\n"
-        "🟢 আপনার পেমেন্ট রিকোয়েস্ট সফলভাবে অনুমোদিত হয়েছে।\n"
-        f"📲 নির্ধারিত {method} নম্বর: {account_no}\n\n"
-        "ℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।"
+        f"<b>💰 পরিমাণ: {money(amount)}৳</b>\n"
+        "<b>🟢 আপনার পেমেন্ট রিকোয়েস্ট সফলভাবে অনুমোদিত হয়েছে।</b>"
     )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Withdraw approved.")
@@ -1333,12 +1408,10 @@ async def admin_wd_reject(call: CallbackQuery):
 
     await bot.send_message(
         uid,
-        "🚫 WITHDRAW CANCELLED\n"
+        "<b>🚫 WITHDRAW CANCELLED</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Amount: {money(amount)}৳\n"
-        "আপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে।\n"
-        f"↩️ {money(amount)}৳ আপনার অ্যাকাউন্ট ব্যালেন্সে পুনরায় যোগ হয়েছে।\n\n"
-        "ℹ️ কারণ: Withdrawal request rejected by admin."
+        f"<b>💰 Amount: {money(amount)}৳</b>\n"
+        "<b>আপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে এবং ব্যালেন্স ফেরত দেওয়া হয়েছে।</b>"
     )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Withdraw rejected.")
@@ -1350,24 +1423,12 @@ async def inline_cancel(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     uid = call.from_user.id
-    await call.message.answer("❌ বাতিল করা হয়েছে।", reply_markup=main_keyboard(uid))
+    await call.message.answer("<b>❌ বাতিল করা হয়েছে।</b>", reply_markup=main_keyboard(uid))
     await call.answer()
 
 # =========================
 # ADVANCED ADMIN PANEL
 # =========================
-def getset(k, default=""):
-    con = db()
-    r = con.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
-    con.close()
-    return r[0] if r else default
-
-def setset(k, v):
-    con = db()
-    con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
-    con.commit()
-    con.close()
-
 def admin_kb(uid):
     rows = [
         [InlineKeyboardButton(text="📊 Dashboard", callback_data="x:dash")],
@@ -1385,9 +1446,9 @@ def admin_kb(uid):
 @dp.message(F.text == "🔧 Admin Panel")
 async def advanced_admin_button(message: Message):
     if not admin_ok(message.from_user.id):
-        await message.answer("❌ আপনার Admin access নেই।")
+        await message.answer("<b>❌ আপনার Admin access নেই।</b>")
         return
-    await message.answer("🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface", reply_markup=admin_kb(message.from_user.id))
+    await message.answer("<b>🔐 ADMIN CONTROL PANEL</b>\n━━━━━━━━━━━━━━━━━━\n<b>সম্পূর্ণ dynamic control interface</b>", reply_markup=admin_kb(message.from_user.id))
 
 @dp.callback_query(F.data.startswith("x:"))
 async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
@@ -1397,7 +1458,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
     
     data = call.data
     if data == "x:open":
-        await call.message.edit_text("🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface", reply_markup=admin_kb(call.from_user.id))
+        await call.message.edit_text("<b>🔐 ADMIN CONTROL PANEL</b>\n━━━━━━━━━━━━━━━━━━\n<b>সম্পূর্ণ dynamic control interface</b>", reply_markup=admin_kb(call.from_user.id))
         await call.answer()
     elif data == "x:close":
         await call.message.delete()
@@ -1411,7 +1472,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         wth = cur.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status IN ('Approved','Success')").fetchone()[0]
         con.close()
         await call.message.edit_text(
-            f"📊 LIVE ADMIN DASHBOARD\n━━━━━━━━━━━━━━━━━━\n👥 Total Users: {users}\n💎 VIP Buyers: {vip}\n💰 Total Fund: {money(fund)}৳\n💸 Total Withdraw: {money(wth)}৳\n\n🤖 Bot: {'🟢 ON' if getset('bot_enabled')=='1' else '🔴 OFF'}",
+            f"<b>📊 LIVE ADMIN DASHBOARD</b>\n━━━━━━━━━━━━━━━━━━\n<b>👥 Total Users: {users}</b>\n<b>💎 VIP Buyers: {vip}</b>\n<b>💰 Total Fund: {money(fund)}৳</b>\n<b>💸 Total Withdraw: {money(wth)}৳</b>\n\n<b>🤖 Bot: {'🟢 ON' if getset('bot_enabled')=='1' else '🔴 OFF'}</b>",
             reply_markup=admin_kb(call.from_user.id)
         )
         await call.answer()
@@ -1422,7 +1483,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text=f'💸 Withdraw: {"🟢 ON" if getset("withdraw_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:withdraw_enabled")],
             [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
         ])
-        await call.message.edit_text("⚙️ BOT / MASTER CONTROLS", reply_markup=kb)
+        await call.message.edit_text("<b>⚙️ BOT / MASTER CONTROLS</b>", reply_markup=kb)
         await call.answer()
     elif data.startswith("x:t:"):
         key = data.split(":")[-1]
@@ -1440,12 +1501,12 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
     elif data.startswith("x:num:"):
         await state.update_data(method=data.split(":")[-1])
         await state.set_state(AdvancedAdminState.number)
-        await call.message.answer("📲 নতুন ১১ ডিজিটের নম্বর পাঠান।")
+        await call.message.answer("<b>📲 নতুন ১১ ডিজিটের নম্বর পাঠান।</b>")
         await call.answer()
     elif data.startswith("x:gw:"):
         await state.update_data(method=data.split(":")[-1])
         await state.set_state(AdvancedAdminState.gateway_url)
-        await call.message.answer("🔗 Payment Gateway URL পাঠান (https://...)।")
+        await call.message.answer("<b>🔗 Payment Gateway URL পাঠান (https://...)।</b>")
         await call.answer()
     elif data.startswith("x:rm:"):
         m = data.split(":")[-1]
@@ -1457,7 +1518,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
     elif data.startswith("x:v:"):
         await state.update_data(key=data.split(":")[-1])
         await state.set_state(AdvancedAdminState.generic_value)
-        await call.message.answer("✏️ নতুন সংখ্যাটি পাঠান।")
+        await call.message.answer("<b>✏️ নতুন সংখ্যাটি পাঠান।</b>")
         await call.answer()
     elif data == "x:force":
         await x_force_helper(call)
@@ -1466,7 +1527,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         await x_force_helper(call)
     elif data == "x:fjset":
         await state.set_state(AdvancedAdminState.force_chat)
-        await call.message.answer("📣 Channel username বা chat ID পাঠান। যেমন @NIKAN_EARN")
+        await call.message.answer("<b>📣 Channel username বা chat ID পাঠান। যেমন @NIKAN_EARN</b>")
         await call.answer()
     elif data == "x:fjrm":
         setset("force_join_enabled", "0")
@@ -1479,11 +1540,11 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="💎 Plan Add", callback_data="x:plan")],
             [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
         ])
-        await call.message.edit_text("👤 USER CONTROL PANEL\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।", reply_markup=kb)
+        await call.message.edit_text("<b>👤 USER CONTROL PANEL</b>", reply_markup=kb)
         await call.answer()
     elif data == "x:usearch":
         await state.set_state(AdvancedAdminState.user_id)
-        await call.message.answer("🆔 User Telegram ID পাঠান।")
+        await call.message.answer("<b>🆔 User Telegram ID পাঠান।</b>")
         await call.answer()
     elif data.startswith("x:ban:"):
         _, _, uid, val = data.split(":")
@@ -1495,7 +1556,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         con.commit()
         con.close()
         await call.answer("Updated")
-        await call.message.answer(f"✅ Ban status: {'ON' if val else 'OFF'}")
+        await call.message.answer(f"<b>✅ Ban status: {'ON' if val else 'OFF'}</b>")
     elif data.startswith("x:sus:"):
         _, _, uid, val = data.split(":")
         uid, val = int(uid), int(val)
@@ -1506,22 +1567,22 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         con.commit()
         con.close()
         await call.answer("Updated")
-        await call.message.answer(f"✅ Suspend status: {'ON' if val else 'OFF'}")
+        await call.message.answer(f"<b>✅ Suspend status: {'ON' if val else 'OFF'}</b>")
     elif data.startswith("x:edit:"):
         _, _, uid, field = data.split(":")
         await state.update_data(uid=int(uid), field=field)
         await state.set_state(AdvancedAdminState.user_value)
-        await call.message.answer(f"✏️ {field}\nনতুন absolute value পাঠান।")
+        await call.message.answer(f"<b>✏️ {field} এর নতুন মান পাঠান।</b>")
         await call.answer()
     elif data.startswith("x:bmain:"):
         uid = int(data.split(":")[-1])
         await state.update_data(uid=uid, field="bonus_balance")
         await state.set_state(AdvancedAdminState.user_value)
-        await call.message.answer("🎁 Bonus Balance থেকে কত টাকা Main Balance-এ transfer করবেন?")
+        await call.message.answer("<b>🎁 Bonus Balance থেকে কত টাকা Main Balance-এ transfer করবেন?</b>")
         await call.answer()
     elif data == "x:plan":
         await state.set_state(AdvancedAdminState.plan_uid)
-        await call.message.answer("🆔 User ID পাঠান।")
+        await call.message.answer("<b>🆔 User ID পাঠান।</b>")
         await call.answer()
     elif data.startswith("x:padd:"):
         _, _, uid, p = data.split(":")
@@ -1533,19 +1594,19 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         con.commit()
         con.close()
         await state.clear()
-        await call.message.answer(f"✅ {p} added to {uid}.")
+        await call.message.answer(f"<b>✅ {p} added to {uid}.</b>")
         await call.answer("Added")
     elif data == "x:ubroadcast":
         await state.set_state(AdvancedAdminState.user_broadcast_id)
-        await call.message.answer("🆔 User ID পাঠান।")
+        await call.message.answer("<b>🆔 User ID পাঠান।</b>")
         await call.answer()
     elif data == "x:broadcast":
         await state.set_state(AdvancedAdminState.broadcast)
-        await call.message.answer("📢 Broadcast message লিখুন। তারপর Confirm/Cancel দেখানো হবে।")
+        await call.message.answer("<b>📢 Broadcast message লিখুন।</b>")
         await call.answer()
     elif data == "x:bccancel":
         await state.clear()
-        await call.message.edit_text("❌ Broadcast cancelled.")
+        await call.message.edit_text("<b>❌ Broadcast cancelled.</b>")
         await call.answer()
     elif data == "x:bcok":
         textmsg = (await state.get_data()).get("text", "")
@@ -1561,20 +1622,20 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
             except Exception:
                 fail += 1
             await asyncio.sleep(0.04)
-        await call.message.edit_text(f"📢 Broadcast finished.\n✅ Sent: {sent}\n❌ Failed: {fail}")
+        await call.message.edit_text(f"<b>📢 Broadcast finished.</b>\n<b>✅ Sent: {sent}</b>\n<b>❌ Failed: {fail}</b>")
         await call.answer()
     elif data == "x:deps":
         con = db()
         rows = con.execute("SELECT id,user_id,method,amount,txid,order_no,status FROM deposits WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
         con.close()
         if not rows:
-            return await call.message.answer("📥 No pending deposits.")
+            return await call.message.answer("<b>📥 No pending deposits.</b>")
         for did, uid, m, a, t, o, s in rows:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:dproc:{did}")],
                 [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:dok:{o}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:dno:{o}")]
             ])
-            await call.message.answer(f"📥 #{did}\n👤 {uid}\n💳 {m}\n💰 {money(a)}৳\n📝 {t}\n🆔 {o}\n📌 {s}", reply_markup=kb)
+            await call.message.answer(f"<b>📥 #{did}</b>\n<b>👤 {uid}</b>\n<b>💳 {m}</b>\n<b>💰 {money(a)}৳</b>\n<b>📝 {t}</b>\n<b>🆔 {o}</b>", reply_markup=kb)
         await call.answer()
     elif data.startswith("x:dproc:"):
         did = int(data.split(":")[-1])
@@ -1601,7 +1662,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         con.close()
         await bot.send_message(
             uid,
-            f"🎉 Deposit Successful!\nআপনার {m} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅\n━━━━━━━━━━━━━━━━━━\n💰 Deposit Amount: {money(a)} BDT\n📝 Transaction ID: {t}\n🆔 Order Number: {oid}\n━━━━━━━━━━━━━━━━━━\n💳 আপনার মূল ডিপোজিট ব্যালেন্সে {money(a)} BDT যোগ করা হয়েছে।\nধন্যবাদ। ❤️\n\nℹ️ Admin reason: Approved by admin"
+            f"<b>🎉 Deposit Successful!</b>\n<b>আপনার {m} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅</b>\n<b>💰 Amount: {money(a)} BDT</b>"
         )
         await call.message.edit_reply_markup(reply_markup=None)
         await call.answer("Approved")
@@ -1609,20 +1670,20 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         oid = data.split(":")[-1]
         await state.update_data(kind="deposit", rid=oid)
         await state.set_state(AdvancedAdminState.reject_reason)
-        await call.message.answer("❌ Reject Reason লিখুন।")
+        await call.message.answer("<b>❌ Reject Reason লিখুন।</b>")
         await call.answer()
     elif data == "x:wds":
         con = db()
         rows = con.execute("SELECT id,user_id,method,account,amount,status FROM withdrawals WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
         con.close()
         if not rows:
-            return await call.message.answer("📤 No pending withdrawals.")
+            return await call.message.answer("<b>📤 No pending withdrawals.</b>")
         for wid, uid, m, acc, a, s in rows:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:wproc:{wid}")],
                 [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:wok:{wid}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:wno:{wid}")]
             ])
-            await call.message.answer(f"📤 #{wid}\n👤 {uid}\n💳 {m}\n📲 {acc}\n💰 {money(a)}৳\n📌 {s}", reply_markup=kb)
+            await call.message.answer(f"<b>📤 #{wid}</b>\n<b>👤 {uid}</b>\n<b>💳 {m}</b>\n<b>📲 {acc}</b>\n<b>💰 {money(a)}৳</b>", reply_markup=kb)
         await call.answer()
     elif data.startswith("x:wproc:"):
         wid = int(data.split(":")[-1])
@@ -1647,7 +1708,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         con.close()
         await bot.send_message(
             uid,
-            f"🎊 উইথড্র কনফার্মড!\n💰 পরিমাণ: {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে।\n📲 {m}: {acc}\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।"
+            f"<b>🎊 উইথড্র কনফার্মড!</b>\n<b>💰 পরিমাণ: {money(a)}৳</b>\n<b>🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে।</b>"
         )
         await call.message.edit_reply_markup(reply_markup=None)
         await call.answer("Approved")
@@ -1655,16 +1716,16 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         wid = int(data.split(":")[-1])
         await state.update_data(kind="withdraw", rid=wid)
         await state.set_state(AdvancedAdminState.reject_reason)
-        await call.message.answer("❌ Withdraw Reject Reason লিখুন।")
+        await call.message.answer("<b>❌ Withdraw Reject Reason লিখুন।</b>")
         await call.answer()
     elif data == "x:admins":
         if not super_ok(call.from_user.id):
-            await call.message.answer("শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!")
+            await call.message.answer("<b>শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!</b>")
             return await call.answer()
         con = db()
         rows = con.execute("SELECT user_id,role FROM admins ORDER BY user_id").fetchall()
         con.close()
-        text = "👑 ADMIN MANAGEMENT\n━━━━━━━━━━━━━━━━━━\n" + ("\n".join(f"🆔 {u} — {r}" for u, r in rows) or "None")
+        text = "<b>👑 ADMIN MANAGEMENT</b>\n━━━━━━━━━━━━━━━━━━\n" + ("\n".join(f"<b>🆔 {u} — {r}</b>" for u, r in rows) or "None")
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Add Admin", callback_data="x:addadmin"), InlineKeyboardButton(text="➖ Remove Admin", callback_data="x:rmadmin")],
             [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
@@ -1675,13 +1736,13 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         if not super_ok(call.from_user.id):
             return await call.answer("Owner only", show_alert=True)
         await state.set_state(AdvancedAdminState.add_admin)
-        await call.message.answer("➕ নতুন Admin-এর User Telegram ID পাঠান।")
+        await call.message.answer("<b>➕ নতুন Admin-এর User Telegram ID পাঠান।</b>")
         await call.answer()
     elif data == "x:rmadmin":
         if not super_ok(call.from_user.id):
             return await call.answer("Owner only", show_alert=True)
         await state.set_state(AdvancedAdminState.remove_admin)
-        await call.message.answer("➖ Remove করতে চাওয়া Admin-এর User Telegram ID পাঠান।")
+        await call.message.answer("<b>➖ Remove করতে চাওয়া Admin-এর User Telegram ID পাঠান।</b>")
         await call.answer()
 
 async def x_controls_helper(call: CallbackQuery):
@@ -1691,38 +1752,32 @@ async def x_controls_helper(call: CallbackQuery):
         [InlineKeyboardButton(text=f'💸 Withdraw: {"🟢 ON" if getset("withdraw_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:withdraw_enabled")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
-    await call.message.edit_text("⚙️ BOT / MASTER CONTROLS", reply_markup=kb)
+    await call.message.edit_text("<b>⚙️ BOT / MASTER CONTROLS</b>", reply_markup=kb)
 
 async def x_pay_helper(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f'Dep bKash: {"🟢 ON" if getset("dep_bkash_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:dep_bkash_enabled"), InlineKeyboardButton(text=f'Dep Nagad: {"🟢 ON" if getset("dep_nagad_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:dep_nagad_enabled")],
         [InlineKeyboardButton(text=f'Wth bKash: {"🟢 ON" if getset("wth_bkash_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_bkash_enabled"), InlineKeyboardButton(text=f'Wth Nagad: {"🟢 ON" if getset("wth_nagad_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_nagad_enabled")],
-        [InlineKeyboardButton(text=f'Wth Rocket: {"🟢 ON" if getset("wth_rocket_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_rocket_enabled"), InlineKeyboardButton(text=f'Wth Upay: {"🟢 ON" if getset("wth_upay_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_upay_enabled")],
-        [InlineKeyboardButton(text="🔄 All Withdraw ON/OFF", callback_data="x:allw")],
-        [InlineKeyboardButton(text="📲 Set bKash Number", callback_data="x:num:bKash"), InlineKeyboardButton(text="📲 Set Nagad Number", callback_data="x:num:Nagad")],
-        [InlineKeyboardButton(text="🔗 Add/Edit bKash Gateway", callback_data="x:gw:bKash"), InlineKeyboardButton(text="🔗 Add/Edit Nagad Gateway", callback_data="x:gw:Nagad")],
-        [InlineKeyboardButton(text="🗑 Remove bKash Gateway", callback_data="x:rm:bKash"), InlineKeyboardButton(text="🗑 Remove Nagad Gateway", callback_data="x:rm:Nagad")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
-    await call.message.edit_text("💳 PAYMENT CONTROLS\n━━━━━━━━━━━━━━━━━━\nবিকাশ/নগদের Payment Gateway link এখান থেকেই Add/Edit/Remove করা যাবে।", reply_markup=kb)
+    await call.message.edit_text("<b>💳 PAYMENT CONTROLS</b>", reply_markup=kb)
 
 async def x_limits_helper(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f'Min Dep {getset("min_dep")}৳', callback_data="x:v:min_dep"), InlineKeyboardButton(text=f'Max Dep {getset("max_dep")}৳', callback_data="x:v:max_dep")],
         [InlineKeyboardButton(text=f'Min Wth {getset("min_wth")}৳', callback_data="x:v:min_wth"), InlineKeyboardButton(text=f'Max Wth {getset("max_wth")}৳', callback_data="x:v:max_wth")],
-        [InlineKeyboardButton(text=f'Daily Dep Limit {getset("daily_dep_limit")}', callback_data="x:v:daily_dep_limit")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
-    await call.message.edit_text("📈 LIMIT & AMOUNT CONFIGURATION", reply_markup=kb)
+    await call.message.edit_text("<b>📈 LIMIT CONFIGURATION</b>", reply_markup=kb)
 
 async def x_force_helper(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f'📣 Force Join: {"🟢 ON" if getset("force_join_enabled")=="1" else "🔴 OFF"}', callback_data="x:tforce")],
-        [InlineKeyboardButton(text="➕ Set Channel/Group", callback_data="x:fjset"), InlineKeyboardButton(text="🗑 Remove", callback_data="x:fjrm")],
+        [InlineKeyboardButton(text="➕ Set Channel", callback_data="x:fjset"), InlineKeyboardButton(text="🗑 Remove", callback_data="x:fjrm")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
     await call.message.edit_text(
-        f'📣 FORCE JOIN\nChat: {getset("force_join_chat") or "Not set"}\nLink: {getset("force_join_link") or "Not set"}',
+        f'<b>📣 FORCE JOIN</b>\n<b>Chat: {getset("force_join_chat") or "Not set"}</b>',
         reply_markup=kb
     )
 
@@ -1732,12 +1787,12 @@ async def x_num(message: Message, state: FSMContext):
         return
     n = message.text.strip()
     if not re.fullmatch(r"01[3-9]\d{8}", n):
-        return await message.answer("❌ সঠিক ১১ ডিজিটের নম্বর দিন।")
+        return await message.answer("<b>❌ সঠিক ১১ ডিজিটের নম্বর দিন।</b>")
     m = (await state.get_data())["method"]
     setset("bkash_number" if m == "bKash" else "nagad_number", n)
     await state.clear()
     uid = message.from_user.id
-    await message.answer(f"✅ {m} number updated: {n}", reply_markup=main_keyboard(uid))
+    await message.answer(f"<b>✅ {m} number updated: {n}</b>", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.gateway_url)
 async def x_gw(message: Message, state: FSMContext):
@@ -1745,12 +1800,12 @@ async def x_gw(message: Message, state: FSMContext):
         return
     url = message.text.strip()
     if not re.match(r"^https?://", url):
-        return await message.answer("❌ Valid http/https URL দিন।")
+        return await message.answer("<b>❌ Valid http/https URL দিন।</b>")
     m = (await state.get_data())["method"]
     setset("dep_bkash_gateway" if m == "bKash" else "dep_nagad_gateway", url)
     await state.clear()
     uid = message.from_user.id
-    await message.answer(f"✅ {m} gateway saved.", reply_markup=main_keyboard(uid))
+    await message.answer(f"<b>✅ {m} gateway saved.</b>", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.generic_value)
 async def x_value(message: Message, state: FSMContext):
@@ -1760,12 +1815,12 @@ async def x_value(message: Message, state: FSMContext):
         v = Decimal(message.text.strip())
         assert v >= 0
     except Exception:
-        return await message.answer("❌ Valid positive number দিন।")
+        return await message.answer("<b>❌ Valid positive number দিন।</b>")
     k = (await state.get_data())["key"]
     setset(k, money(v))
     await state.clear()
     uid = message.from_user.id
-    await message.answer(f"✅ {k} = {money(v)} সেট হয়েছে।", reply_markup=main_keyboard(uid))
+    await message.answer(f"<b>✅ {k} = {money(v)} সেট হয়েছে।</b>", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.force_chat)
 async def x_fjchat(message: Message, state: FSMContext):
@@ -1773,7 +1828,7 @@ async def x_fjchat(message: Message, state: FSMContext):
         return
     await state.update_data(chat=message.text.strip())
     await state.set_state(AdvancedAdminState.force_link)
-    await message.answer("🔗 Join link পাঠান।")
+    await message.answer("<b>🔗 Join link পাঠান।</b>")
 
 @dp.message(AdvancedAdminState.force_link)
 async def x_fjlink(message: Message, state: FSMContext):
@@ -1781,14 +1836,14 @@ async def x_fjlink(message: Message, state: FSMContext):
         return
     link = message.text.strip()
     if not re.match(r"^https?://", link):
-        return await message.answer("❌ Valid URL দিন।")
+        return await message.answer("<b>❌ Valid URL দিন।</b>")
     d = await state.get_data()
     setset("force_join_chat", d["chat"])
     setset("force_join_link", link)
     setset("force_join_enabled", "1")
     await state.clear()
     uid = message.from_user.id
-    await message.answer("✅ Force Join set ও ON হয়েছে।", reply_markup=main_keyboard(uid))
+    await message.answer("<b>✅ Force Join set ও ON হয়েছে।</b>", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.user_id)
 async def x_userid(message: Message, state: FSMContext):
@@ -1797,23 +1852,20 @@ async def x_userid(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
     except ValueError:
-        return await message.answer("❌ Numeric User ID দিন।")
+        return await message.answer("<b>❌ Numeric User ID দিন।</b>")
     r = user_row(uid)
     if not r:
         await state.clear()
         uid_msg = message.from_user.id
-        return await message.answer("❌ User পাওয়া যায়নি।", reply_markup=main_keyboard(uid_msg))
+        return await message.answer("<b>❌ User পাওয়া যায়নি।</b>", reply_markup=main_keyboard(uid_msg))
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Ban", callback_data=f"x:ban:{uid}:1"), InlineKeyboardButton(text="✅ Unban", callback_data=f"x:ban:{uid}:0")],
         [InlineKeyboardButton(text="⛔ Suspend", callback_data=f"x:sus:{uid}:1"), InlineKeyboardButton(text="🟢 Unsuspend", callback_data=f"x:sus:{uid}:0")],
-        [InlineKeyboardButton(text="💰 Deposit Balance", callback_data=f"x:edit:{uid}:deposit_balance"), InlineKeyboardButton(text="🫂 Referral Balance", callback_data=f"x:edit:{uid}:referral_balance")],
-        [InlineKeyboardButton(text="🎁 Bonus Balance", callback_data=f"x:edit:{uid}:bonus_balance"), InlineKeyboardButton(text="📝 Task Balance", callback_data=f"x:edit:{uid}:task_balance")],
-        [InlineKeyboardButton(text="💵 Main Balance", callback_data=f"x:edit:{uid}:main_balance"), InlineKeyboardButton(text="👥 Referral Count", callback_data=f"x:edit:{uid}:referral_count")],
         [InlineKeyboardButton(text="🎁 Bonus → Main", callback_data=f"x:bmain:{uid}")]
     ])
     await message.answer(
-        f"👤 USER\n━━━━━━━━━━━━━━━━━━\n👤 {r[1]}\n🔗 @{r[2] or 'None'}\n🆔 {r[0]}\n💵 Main: {money(r[3])}৳\n📥 Deposit: {money(r[4])}৳\n🫂 Referral: {money(r[6])}৳\n🎁 Bonus: {money(r[5])}৳\n📝 Task: {money(r[9])}৳\n👥 Referrals: {r[10]}\n🚫 Ban: {'YES' if r[12] else 'NO'}\n⛔ Suspend: {'YES' if r[13] else 'NO'}",
+        f"<b>👤 USER INFO</b>\n━━━━━━━━━━━━━━━━━━\n<b>👤 {r[1]}</b>\n<b>🆔 {r[0]}</b>\n<b>💵 Main: {money(r[3])}৳</b>",
         reply_markup=kb
     )
 
@@ -1827,11 +1879,7 @@ async def x_edit_value(message: Message, state: FSMContext):
         v = Decimal(message.text.strip())
         assert v >= 0
     except Exception:
-        return await message.answer("❌ Valid positive number দিন।")
-
-    allowed = {"main_balance", "deposit_balance", "referral_balance", "bonus_balance", "task_balance", "referral_count"}
-    if field not in allowed:
-        return
+        return await message.answer("<b>❌ Valid positive number দিন।</b>")
 
     con = db()
     con.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (float(v), uid))
@@ -1839,7 +1887,7 @@ async def x_edit_value(message: Message, state: FSMContext):
     con.close()
     await state.clear()
     uid_msg = message.from_user.id
-    await message.answer(f"✅ User {uid}: {field} = {money(v)}", reply_markup=main_keyboard(uid_msg))
+    await message.answer(f"<b>✅ Updated successfully.</b>", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.plan_uid)
 async def x_plan_uid(message: Message, state: FSMContext):
@@ -1848,9 +1896,9 @@ async def x_plan_uid(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
     except ValueError:
-        return await message.answer("❌ Numeric ID দিন।")
+        return await message.answer("<b>❌ Numeric ID দিন।</b>")
     if not user_row(uid):
-        return await message.answer("❌ User not found.")
+        return await message.answer("<b>❌ User not found.</b>")
     await state.update_data(uid=uid)
     await state.set_state(AdvancedAdminState.plan_name)
     names = list(PLANS)
@@ -1858,7 +1906,7 @@ async def x_plan_uid(message: Message, state: FSMContext):
         [InlineKeyboardButton(text=p, callback_data=f"x:padd:{uid}:{p}") for p in names[i:i+3]]
         for i in range(0, len(names), 3)
     ])
-    await message.answer("💎 Plan নির্বাচন করুন।", reply_markup=kb)
+    await message.answer("<b>💎 Plan নির্বাচন করুন।</b>", reply_markup=kb)
 
 @dp.message(AdvancedAdminState.user_broadcast_id)
 async def x_ubid(message: Message, state: FSMContext):
@@ -1867,12 +1915,12 @@ async def x_ubid(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
     except ValueError:
-        return await message.answer("❌ Numeric ID দিন।")
+        return await message.answer("<b>❌ Numeric ID দিন।</b>")
     if not user_row(uid):
-        return await message.answer("❌ User not found.")
+        return await message.answer("<b>❌ User not found.</b>")
     await state.update_data(uid=uid)
     await state.set_state(AdvancedAdminState.user_broadcast_text)
-    await message.answer("✉️ Message লিখুন।")
+    await message.answer("<b>✉️ Message লিখুন।</b>")
 
 @dp.message(AdvancedAdminState.user_broadcast_text)
 async def x_ubtext(message: Message, state: FSMContext):
@@ -1882,9 +1930,9 @@ async def x_ubtext(message: Message, state: FSMContext):
     uid = d["uid"]
     try:
         await bot.send_message(uid, message.text or "")
-        out = "✅ Message পাঠানো হয়েছে।"
+        out = "<b>✅ Message পাঠানো হয়েছে।</b>"
     except Exception as e:
-        out = f"❌ পাঠানো যায়নি: {type(e).__name__}"
+        out = f"<b>❌ পাঠানো যায়নি: {type(e).__name__}</b>"
     await state.clear()
     uid_msg = message.from_user.id
     await message.answer(out, reply_markup=main_keyboard(uid_msg))
@@ -1899,7 +1947,7 @@ async def x_bc_preview(message: Message, state: FSMContext):
         InlineKeyboardButton(text="❌ Cancel", callback_data="x:bccancel")
     ]])
     await message.answer(
-        "📢 BROADCAST PREVIEW\n━━━━━━━━━━━━━━━━━━\n" + (message.text or "") + "\n━━━━━━━━━━━━━━━━━━\nসকল user-কে পাঠাবেন?",
+        "<b>📢 BROADCAST PREVIEW</b>\n━━━━━━━━━━━━━━━━━━\n" + (message.text or "") + "\n━━━━━━━━━━━━━━━━━━\n<b>সকল user-কে পাঠাবেন?</b>",
         reply_markup=kb
     )
 
@@ -1917,32 +1965,26 @@ async def x_reject_reason(message: Message, state: FSMContext):
         if not r:
             con.close()
             await state.clear()
-            return await message.answer("❌ Request not found.")
+            return await message.answer("<b>❌ Request not found.</b>")
         uid, a, t, m, s = r
         cur.execute("UPDATE deposits SET status='Rejected',reason=?,updated_at=? WHERE order_no=?", (reason, now_iso(), rid))
-        await bot.send_message(
-            uid,
-            f"❌ Deposit Failed!\nআপনার দেওয়া Transaction ID সঠিক নয় অথবা এই Transaction ID-এর মাধ্যমে কোনো পেমেন্ট শনাক্ত করা যায়নি。\n📝 Transaction ID: {t}\n🆔 Order No: {rid}\n\n❗ Reject Reason: {reason}\n\n🔄 অনুগ্রহ করে সঠিক Transaction ID দিয়ে আবার চেষ্টা করুন।"
-        )
+        await bot.send_message(uid, f"<b>❌ Deposit Failed! Reason: {reason}</b>")
     else:
         r = cur.execute("SELECT user_id,amount,method,account,status FROM withdrawals WHERE id=?", (int(rid),)).fetchone()
         if not r:
             con.close()
             await state.clear()
-            return await message.answer("❌ Request not found.")
+            return await message.answer("<b>❌ Request not found.</b>")
         uid, a, m, acc, s = r
         if s != "Rejected":
             cur.execute("UPDATE withdrawals SET status='Rejected',reason=?,updated_at=? WHERE id=?", (reason, now_iso(), int(rid)))
             cur.execute("UPDATE users SET main_balance=main_balance+? WHERE user_id=?", (a, uid))
-        await bot.send_message(
-            uid,
-            f"🚫 WITHDRAW CANCELLED\n💰 Amount: {money(a)}৳\nআপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে।\n↩️ {money(a)}৳ আপনার অ্যাকাউন্ট ব্যালেন্সে পুনরায় যোগ হয়েছে।\n\n❗ Reject Reason: {reason}"
-        )
+        await bot.send_message(uid, f"<b>🚫 WITHDRAW CANCELLED. Reason: {reason}</b>")
     con.commit()
     con.close()
     await state.clear()
     uid_msg = message.from_user.id
-    await message.answer("✅ Status updated এবং user notification পাঠানো হয়েছে।", reply_markup=main_keyboard(uid_msg))
+    await message.answer("<b>✅ Status updated.</b>", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.add_admin)
 async def x_do_addadmin(message: Message, state: FSMContext):
@@ -1951,14 +1993,14 @@ async def x_do_addadmin(message: Message, state: FSMContext):
     try:
         uid = int(message.text.strip())
     except ValueError:
-        return await message.answer("❌ Numeric ID দিন।")
+        return await message.answer("<b>❌ Numeric ID দিন।</b>")
     con = db()
     con.execute("INSERT OR REPLACE INTO admins(user_id,role,added_at) VALUES(?,'admin',?)", (uid, now_iso()))
     con.commit()
     con.close()
     await state.clear()
     uid_msg = message.from_user.id
-    await message.answer(f"✅ User {uid} now Admin.", reply_markup=main_keyboard(uid_msg))
+    await message.answer(f"<b>✅ User {uid} now Admin.</b>", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.remove_admin)
 async def x_do_rmadmin(message: Message, state: FSMContext):
@@ -1969,20 +2011,14 @@ async def x_do_rmadmin(message: Message, state: FSMContext):
     except ValueError:
         return await message.answer("❌ Numeric ID দিন।")
     if uid == OWNER_ID:
-        return await message.answer("❌ Owner-কে সরাতে পারবেন না।")
+        return await message.answer("<b>❌ Owner-কে সরাতে পারবেন না।</b>")
     con = db()
     con.execute("DELETE FROM admins WHERE user_id=?", (uid,))
     con.commit()
     con.close()
     await state.clear()
     uid_msg = message.from_user.id
-    await message.answer(f"✅ Admin {uid} removed.", reply_markup=main_keyboard(uid_msg))
-
-@dp.message(F.text == "🔧 Admin Panel")
-async def unauthorized_admin_panel_text(message: Message):
-    if not admin_ok(message.from_user.id):
-        await message.answer("❌ আপনার Admin access নেই।")
-        return
+    await message.answer(f"<b>✅ Admin {uid} removed.</b>", reply_markup=main_keyboard(uid_msg))
 
 # =========================
 # MAIN ENTRY POINT
