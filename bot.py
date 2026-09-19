@@ -19,7 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA" আপনার বটের আসল টোকেন এখানে দিন
+BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার বটের আসল টোকেন এখানে দিন
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
@@ -237,7 +237,6 @@ def main_keyboard(user_id: int):
         [KeyboardButton(text="💎 Available Plans"), KeyboardButton(text="🧾 Transaction History")],
         [KeyboardButton(text="🆘 Help & Support")],
     ]
-    # Conditional inclusion of Admin Panel for admins only
     if admin_ok(user_id):
         keyboard_rows.append([KeyboardButton(text="🔧 Admin Panel")])
 
@@ -433,7 +432,7 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     txid = message.text.strip()
     if not re.fullmatch(r"0x[a-fA-F0-9]{64}", txid):
         await message.answer(
-            "❌ TxID সঠিক নয়।\n"
+            "❌ TxID সঠিক নয়。\n"
             "0x দিয়ে শুরু হওয়া 64-hex-character Transaction Hash পাঠান।"
         )
         return
@@ -454,7 +453,7 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     await message.answer(
-        "✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে।\n"
+        "✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে。\n"
         "⏳ অনুমোদনের জন্য অপেক্ষা করুন।",
         reply_markup=main_keyboard(uid)
     )
@@ -1050,7 +1049,7 @@ async def buy_plan(call: CallbackQuery):
         f"📅 মেয়াদ: {PLAN_DAYS} দিন\n"
         f"📊 Demo দৈনিক আয়: ৳{money(daily)}\n\n"
         "💵 Daily Earnings থেকে claim করতে পারবেন।\n"
-        "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে।\n\n"
+        "⏳ Plan-এর মেয়াদ সক্রিয় হওয়ার সময় থেকে গণনা হবে。\n\n"
         "⚠️ Daily amount একটি DEMO/SIMULATION calculation; কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।"
     )
     await call.answer("✅ Plan activated!")
@@ -1388,7 +1387,6 @@ async def advanced_admin_button(message: Message):
 
 @dp.callback_query(F.data.startswith("x:"))
 async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
-    # Security backend check for any admin callback prefix 'x:'
     if not admin_ok(call.from_user.id):
         await call.answer("❌ আপনার Admin access নেই।", show_alert=True)
         return
@@ -1976,7 +1974,6 @@ async def x_do_rmadmin(message: Message, state: FSMContext):
     uid_msg = message.from_user.id
     await message.answer(f"✅ Admin {uid} removed.", reply_markup=main_keyboard(uid_msg))
 
-# Fallback security handler for manual text "🔧 Admin Panel" input by unauthorized users
 @dp.message(F.text == "🔧 Admin Panel")
 async def unauthorized_admin_panel_text(message: Message):
     if not admin_ok(message.from_user.id):
