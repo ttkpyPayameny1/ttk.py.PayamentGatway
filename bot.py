@@ -1,4 +1,4 @@
-# NIKAN EARN - Reply Keyboard Demo Bot (Fixed Version)
+# NIKAN EARN - Reply Keyboard Demo Bot (Fixed & Updated Version)
 # Python 3.10+ / aiogram 3.x
 
 import asyncio
@@ -19,7 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার বটের আসল টোকেন এখানে দিন
+BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
@@ -43,7 +43,6 @@ DEMO_DAILY_RATE = Decimal("0.34")
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# Simple callback deduplication cache (In-Memory) with timestamp cleaning
 PROCESSED_CALLBACKS = {}
 
 def callback_once(key: str, ttl: int = 5) -> bool:
@@ -65,6 +64,9 @@ def db():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+def order_no():
+    return "RC" + datetime.now().strftime("%Y%m%d%H%M%S%f")[:21]
 
 def init_db():
     con = db()
@@ -205,9 +207,6 @@ def user_row(uid: int):
 def money(x):
     return f"{Decimal(str(x)):.2f}".rstrip("0").rstrip(".")
 
-def order_no():
-    return "RC" + datetime.now().strftime("%Y%m%d%H%M%S%f")[:21]
-
 # =========================
 # KEYBOARDS & ADMIN CHECKS
 # =========================
@@ -334,7 +333,7 @@ async def dep_local_method(call: CallbackQuery, state: FSMContext):
     if not callback_once(f"dep_meth:{call.from_user.id}:{call.data}"):
         await call.answer()
         return
-    method = "bKash" if call.data == "dep_bkash" else "Nagad"
+    method = "BKASH" if call.data == "dep_bkash" else "NAGAD"
     await state.update_data(method=method)
     await state.set_state(DepositState.amount)
     await call.message.answer(
@@ -388,18 +387,19 @@ async def dep_local_amount(message: Message, state: FSMContext):
     method = data.get("method")
     user_id = message.from_user.id
 
-    # ডায়নামিক পেমেন্ট গেটওয়ে লিংক যেখানে অ্যামাউন্ট এবং ইউজার আইডি পাস করা হয়েছে
     payment_url = f"{PAYMENT_GATEWAY_URL}/?amount={amount}&user_id={user_id}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=payment_url)],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
     ])
+    
+    uid = message.from_user.id
     await message.answer(
         f"💰 ডিপোজিট এমাউন্ট: {money(amount)}৳\n\n"
         "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।\n\n"
         f"💳 Method: {method}",
-        reply_markup=kb
+        reply_markup=main_keyboard(uid) # মেইন মেনু ফিরিয়ে দেওয়া হলো
     )
     await state.clear()
 
@@ -457,8 +457,7 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     await message.answer(
-        "✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে。\n"
-        "⏳ অনুমোদনের জন্য অপেক্ষা করুন।",
+        "⏳ আপনার ট্রানজেকশন আইডিটি ভেরিফিকেশনের জন্য পাঠানো হয়েছে। সঠিক তথ্য থাকলে খুব দ্রুত ব্যালেন্স যুক্ত হয়ে যাবে। অনুগ্রহ করে অপেক্ষা করুন 🖼️",
         reply_markup=main_keyboard(uid)
     )
 
@@ -467,23 +466,23 @@ async def dep_binance_txid(message: Message, state: FSMContext):
 async def send_admin_deposit(user, method, amount, txid, oid):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_dep_ok:{oid}"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_dep_no:{oid}")
+            InlineKeyboardButton(text="Approve ✅", callback_data=f"adm_dep_ok:{oid}"),
+            InlineKeyboardButton(text="Rejected ❌", callback_data=f"adm_dep_no:{oid}")
         ],
     ])
     username = f"@{user.username}" if user.username else "—"
     await bot.send_message(
         ADMIN_ID,
-        "📥 NEW DEPOSIT REQUEST\n"
+        "📥 নতুন ডিপোজিট রিকোয়েস্ট !\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"👤 নাম: {user.full_name}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user.id}\n"
-        f"💳 Method: {method}\n"
-        f"💰 Amount: {money(amount)}৳\n"
-        f"📝 TxID: {txid}\n"
-        f"🆔 Order No: {oid}\n"
-        "📌 Status: Pending",
+        f"🔗 ইউজারনেম: {username}\n"
+        f"🆔 ইউজার আইডি: {user.id}\n"
+        f"⚙️ মেথড: {method}\n"
+        f"💰 অ্যামাউন্ট: {money(amount)} BDT\n"
+        f"🆔 TxID: {txid}\n"
+        f"📝 Order No: {oid}\n\n"
+        "অ্যাকশন নিন:",
         reply_markup=kb
     )
 
@@ -653,22 +652,22 @@ async def send_admin_withdraw(user, wid, method, account_no, amount):
     username = f"@{user.username}" if user.username else "—"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_wd_ok:{wid}"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_wd_no:{wid}")
+            InlineKeyboardButton(text="Approve ✅", callback_data=f"adm_wd_ok:{wid}"),
+            InlineKeyboardButton(text="Rejected ❌", callback_data=f"adm_wd_no:{wid}")
         ]
     ])
     await bot.send_message(
         ADMIN_ID,
-        "📤 NEW WITHDRAW REQUEST\n"
+        "📤 নতুন উইথড্র রিকোয়েস্ট !\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"👤 নাম: {user.full_name}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user.id}\n"
-        f"💳 Method: {method}\n"
-        f"📲 Account: {account_no}\n"
-        f"💰 Amount: {money(amount)}৳\n"
-        f"🆔 Request ID: {wid}\n"
-        "📌 Status: Pending",
+        f"🔗 ইউজারনেম: {username}\n"
+        f"🆔 ইউজার আইডি: {user.id}\n"
+        f"⚙️ মেথড: {method}\n"
+        f"📲 অ্যাকাউন্ট: {account_no}\n"
+        f"💰 অ্যামাউন্ট: {money(amount)} BDT\n"
+        f"🆔 Request ID: {wid}\n\n"
+        "অ্যাকশন নিন:",
         reply_markup=kb
     )
 
@@ -1572,7 +1571,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         for did, uid, m, a, t, o, s in rows:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:dproc:{did}")],
-                [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:dok:{o}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:dno:{o}")]
+                [InlineKeyboardButton(text="Approve ✅", callback_data=f"x:dok:{o}"), InlineKeyboardButton(text="Rejected ❌", callback_data=f"x:dno:{o}")]
             ])
             await call.message.answer(f"📥 #{did}\n👤 {uid}\n💳 {m}\n💰 {money(a)}৳\n📝 {t}\n🆔 {o}\n📌 {s}", reply_markup=kb)
         await call.answer()
@@ -1620,7 +1619,7 @@ async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
         for wid, uid, m, acc, a, s in rows:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:wproc:{wid}")],
-                [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:wok:{wid}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:wno:{wid}")]
+                [InlineKeyboardButton(text="Approve ✅", callback_data=f"x:wok:{wid}"), InlineKeyboardButton(text="Rejected ❌", callback_data=f"x:wno:{wid}")]
             ])
             await call.message.answer(f"📤 #{wid}\n👤 {uid}\n💳 {m}\n📲 {acc}\n💰 {money(a)}৳\n📌 {s}", reply_markup=kb)
         await call.answer()
@@ -1895,8 +1894,8 @@ async def x_bc_preview(message: Message, state: FSMContext):
         return
     await state.update_data(text=message.text or "")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Confirm", callback_data="x:bcok"),
-        InlineKeyboardButton(text="❌ Cancel", callback_data="x:bccancel")
+        InlineKeyboardButton(text="Approve ✅", callback_data="x:bcok"),
+        InlineKeyboardButton(text="Rejected ❌", callback_data="x:bccancel")
     ]])
     await message.answer(
         "📢 BROADCAST PREVIEW\n━━━━━━━━━━━━━━━━━━\n" + (message.text or "") + "\n━━━━━━━━━━━━━━━━━━\nসকল user-কে পাঠাবেন?",
@@ -1977,12 +1976,6 @@ async def x_do_rmadmin(message: Message, state: FSMContext):
     await state.clear()
     uid_msg = message.from_user.id
     await message.answer(f"✅ Admin {uid} removed.", reply_markup=main_keyboard(uid_msg))
-
-@dp.message(F.text == "🔧 Admin Panel")
-async def unauthorized_admin_panel_text(message: Message):
-    if not admin_ok(message.from_user.id):
-        await message.answer("❌ আপনার Admin access নেই।")
-        return
 
 # =========================
 # MAIN ENTRY POINT
