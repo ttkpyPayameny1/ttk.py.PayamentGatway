@@ -19,7 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার বটের আসল টোকেন এখানে দিন
+BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA" আপনার বটের আসল টোকেন এখানে দিন
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
@@ -330,7 +330,7 @@ async def deposit_menu(message: Message, state: FSMContext):
         reply_markup=kb
     )
 
-@dp.callHERbackback_query(F.data.in_(["dep_bkash", "dep_nagad"]))
+@dp.callback_query(F.data.in_(["dep_bkash", "dep_nagad"]))
 async def dep_local_method(call: CallbackQuery, state: FSMContext):
     if not callback_once(f"dep_meth:{call.from_user.id}:{call.data}"):
         await call.answer()
