@@ -209,17 +209,40 @@ def order_no():
     return "RC" + datetime.now().strftime("%Y%m%d%H%M%S%f")[:21]
 
 # =========================
-# KEYBOARDS
+# KEYBOARDS & ADMIN CHECKS
 # =========================
-def main_keyboard():
+def role(uid):
+    con = db()
+    r = con.execute("SELECT role FROM admins WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    return r[0] if r else None
+
+def admin_ok(uid):
+    try:
+        return int(uid) == int(ADMIN_ID) or role(uid) is not None
+    except Exception:
+        return False
+
+def super_ok(uid):
+    try:
+        return int(uid) == int(OWNER_ID)
+    except Exception:
+        return False
+
+def main_keyboard(user_id: int):
+    keyboard_rows = [
+        [KeyboardButton(text="🔐 ফান্ড ডিপোজিট"), KeyboardButton(text="👤 একাউন্ট")],
+        [KeyboardButton(text="💸 Withdraw"), KeyboardButton(text="👥 Referral")],
+        [KeyboardButton(text="📊 Daily Earnings"), KeyboardButton(text="🎁 Bonus Center")],
+        [KeyboardButton(text="💎 Available Plans"), KeyboardButton(text="🧾 Transaction History")],
+        [KeyboardButton(text="🆘 Help & Support")],
+    ]
+    # Conditional inclusion of Admin Panel for admins only
+    if admin_ok(user_id):
+        keyboard_rows.append([KeyboardButton(text="🔧 Admin Panel")])
+
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔐 ফান্ড ডিপোজিট"), KeyboardButton(text="👤 একাউন্ট")],
-            [KeyboardButton(text="💸 Withdraw"), KeyboardButton(text="👥 Referral")],
-            [KeyboardButton(text="📊 Daily Earnings"), KeyboardButton(text="🎁 Bonus Center")],
-            [KeyboardButton(text="💎 Available Plans"), KeyboardButton(text="🧾 Transaction History")],
-            [KeyboardButton(text="🆘 Help & Support"), KeyboardButton(text="🔧 Admin Panel")],
-        ],
+        keyboard=keyboard_rows,
         resize_keyboard=True,
         input_field_placeholder="একটি অপশন নির্বাচন করুন"
     )
@@ -268,15 +291,17 @@ class AdvancedAdminState(StatesGroup):
 async def start(message: Message, state: FSMContext):
     await state.clear()
     get_user(message)
+    uid = message.from_user.id
     await message.answer(
         "🚀 NIKAN EARN\n\nস্বাগতম! নিচের মেনু থেকে একটি অপশন নির্বাচন করুন।",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(uid)
     )
 
 @dp.message(Command("menu"))
 async def menu(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("🏠 Main Menu\nনিচের মেনু থেকে একটি অপশন নির্বাচন করুন।", reply_markup=main_keyboard())
+    uid = message.from_user.id
+    await message.answer("🏠 Main Menu\nনিচের মেনু থেকে একটি অপশন নির্বাচন করুন।", reply_markup=main_keyboard(uid))
 
 @dp.message(Command("help"))
 async def help_command(message: Message):
@@ -285,7 +310,8 @@ async def help_command(message: Message):
 @dp.message(F.text == "❌ Cancel")
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।", reply_markup=main_keyboard())
+    uid = message.from_user.id
+    await message.answer("❌ বর্তমান প্রক্রিয়াটি বাতিল করা হয়েছে।", reply_markup=main_keyboard(uid))
 
 # =========================
 # DEPOSIT
@@ -304,7 +330,7 @@ async def deposit_menu(message: Message, state: FSMContext):
         reply_markup=kb
     )
 
-@dp.callback_query(F.data.in_(["dep_bkash", "dep_nagad"]))
+@dp.callHERbackback_query(F.data.in_(["dep_bkash", "dep_nagad"]))
 async def dep_local_method(call: CallbackQuery, state: FSMContext):
     if not callback_once(f"dep_meth:{call.from_user.id}:{call.data}"):
         await call.answer()
@@ -426,10 +452,11 @@ async def dep_binance_txid(message: Message, state: FSMContext):
     con.close()
 
     await state.clear()
+    uid = message.from_user.id
     await message.answer(
         "✅ আপনার ডিপোজিটের অনুরোধ জমা করা হয়েছে।\n"
         "⏳ অনুমোদনের জন্য অপেক্ষা করুন।",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(uid)
     )
 
     await send_admin_deposit(message.from_user, "Binance", bdt, txid, oid)
@@ -609,11 +636,12 @@ async def wd_amount(message: Message, state: FSMContext):
     con.close()
 
     await state.clear()
+    uid = message.from_user.id
     await message.answer(
         f"✅ আপনার 💸 {money(amount)}৳ উইথড্র রিকোয়েস্ট সফলভাবে জমা হয়েছে!\n\n"
         "⏳ প্রসেসিং সময়: Admin review\n"
         "অনুমোদন সম্পন্ন হওয়া পর্যন্ত অপেক্ষা করুন।",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(uid)
     )
 
     await send_admin_withdraw(message.from_user, wid, method, account_no, amount)
@@ -825,7 +853,7 @@ async def bonus_center(message: Message):
         "━━━━━━━━━━━━━━━━━━\n"
         f"💰 Available Bonus: {money(bal)}৳\n"
         "🎁 Active Rewards: Daily Free 5৳\n\n"
-        "📌 Bonus Balance সরাসরি withdraw বা plan purchase-এর জন্য ব্যবহার করা যাবে না।\n"
+        "📌 Bonus Balance সরাসরি withdraw বা plan purchase-এর জন্য ব্যবহার করা যাবে না。\n"
         "Admin নির্ধারিত শর্তে Bonus Balance Main Balance-এ convert করতে পারে।",
         reply_markup=kb
     )
@@ -897,7 +925,7 @@ async def available_plans(message: Message):
     await message.answer(
         "💎 Available Plans\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "নিচে একটি Plan নির্বাচন করুন।\n\n"
+        "নিচে একটি Plan নির্বাচন করুন。\n\n"
         "📅 মেয়াদ: 4 দিন\n"
         "📊 Daily calculation: 34% (DEMO/SIMULATION)\n"
         "⚠️ কোনো নির্দিষ্ট লাভ নিশ্চিত নয়।",
@@ -912,7 +940,7 @@ async def plan_details(call: CallbackQuery):
     plan = call.data.split(":", 1)[1]
     amount = PLANS.get(plan)
     if amount is None:
-        await call.answer("Plan পাওয়া যায়নি។", show_alert=True)
+        await call.answer("Plan পাওয়া যায়নি।", show_alert=True)
         return
 
     daily = Decimal(str(amount)) * DEMO_DAILY_RATE
@@ -967,7 +995,7 @@ async def buy_plan(call: CallbackQuery):
         await call.message.answer(
             "⚠️ Plan Limit Reached\n"
             f"দুঃখিত! আপনার {plan} Plan বর্তমানে সর্বোচ্চ ২টি সক্রিয় রয়েছে। ❌\n\n"
-            "📅 এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত একই Plan আর নতুন করে সক্রিয় করতে পারবেন না।\n\n"
+            "📅 এই Plan-এর যেকোনো ১টির মেয়াদ শেষ না হওয়া পর্যন্ত একই Plan আর নতুন করে সক্রিয় করতে পারবেন না。\n\n"
             "💎 তবে অন্যান্য Available Plans থেকে Plan নির্বাচন করতে পারবেন."
         )
         await call.answer()
@@ -1124,7 +1152,7 @@ async def help_rules(call: CallbackQuery):
 async def admin_dep_approve(call: CallbackQuery):
     if not callback_once(f"admin_dep_approve:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
-    if call.from_user.id != ADMIN_ID:
+    if not admin_ok(call.from_user.id):
         await call.answer("Unauthorized", show_alert=True)
         return
 
@@ -1176,7 +1204,7 @@ async def admin_dep_approve(call: CallbackQuery):
 async def admin_dep_reject(call: CallbackQuery):
     if not callback_once(f"admin_dep_reject:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
-    if call.from_user.id != ADMIN_ID:
+    if not admin_ok(call.from_user.id):
         await call.answer("Unauthorized", show_alert=True)
         return
 
@@ -1213,7 +1241,7 @@ async def admin_dep_reject(call: CallbackQuery):
 async def admin_wd_approve(call: CallbackQuery):
     if not callback_once(f"admin_wd_approve:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
-    if call.from_user.id != ADMIN_ID:
+    if not admin_ok(call.from_user.id):
         await call.answer("Unauthorized", show_alert=True)
         return
 
@@ -1263,7 +1291,7 @@ async def admin_wd_approve(call: CallbackQuery):
 async def admin_wd_reject(call: CallbackQuery):
     if not callback_once(f"adm_wd_reject:{call.from_user.id}:{call.data}", ttl=10):
         return await call.answer("Already processing…", show_alert=True)
-    if call.from_user.id != ADMIN_ID:
+    if not admin_ok(call.from_user.id):
         await call.answer("Unauthorized", show_alert=True)
         return
 
@@ -1318,7 +1346,8 @@ async def inline_cancel(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
     await state.clear()
-    await call.message.answer("❌ বাতিল করা হয়েছে।", reply_markup=main_keyboard())
+    uid = call.from_user.id
+    await call.message.answer("❌ বাতিল করা হয়েছে।", reply_markup=main_keyboard(uid))
     await call.answer()
 
 # =========================
@@ -1335,21 +1364,6 @@ def setset(k, v):
     con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
     con.commit()
     con.close()
-
-def role(uid):
-    con = db()
-    r = con.execute("SELECT role FROM admins WHERE user_id=?", (uid,)).fetchone()
-    con.close()
-    return r[0] if r else None
-
-def admin_ok(uid):
-    return role(uid) is not None
-
-def super_ok(uid):
-    return uid == OWNER_ID
-
-def a_toggle(label, key):
-    return f"{label}: " + ("🟢 ON" if getset(key) == "1" else "🔴 OFF")
 
 def admin_kb(uid):
     rows = [
@@ -1372,65 +1386,316 @@ async def advanced_admin_button(message: Message):
         return
     await message.answer("🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface", reply_markup=admin_kb(message.from_user.id))
 
-@dp.callback_query(F.data == "x:open")
-async def x_open(call: CallbackQuery):
+@dp.callback_query(F.data.startswith("x:"))
+async def admin_callbacks_router(call: CallbackQuery, state: FSMContext):
+    # Security backend check for any admin callback prefix 'x:'
     if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    await call.message.edit_text("🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface", reply_markup=admin_kb(call.from_user.id))
-    await call.answer()
+        await call.answer("❌ আপনার Admin access নেই।", show_alert=True)
+        return
+    
+    data = call.data
+    if data == "x:open":
+        await call.message.edit_text("🔐 ADMIN CONTROL PANEL\n━━━━━━━━━━━━━━━━━━\nসম্পূর্ণ dynamic control interface", reply_markup=admin_kb(call.from_user.id))
+        await call.answer()
+    elif data == "x:close":
+        await call.message.delete()
+        await call.answer()
+    elif data == "x:dash":
+        con = db()
+        cur = con.cursor()
+        users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        vip = cur.execute("SELECT COUNT(DISTINCT user_id) FROM plans").fetchone()[0] if cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").fetchone() else 0
+        fund = cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status IN ('Approved','Success')").fetchone()[0]
+        wth = cur.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status IN ('Approved','Success')").fetchone()[0]
+        con.close()
+        await call.message.edit_text(
+            f"📊 LIVE ADMIN DASHBOARD\n━━━━━━━━━━━━━━━━━━\n👥 Total Users: {users}\n💎 VIP Buyers: {vip}\n💰 Total Fund: {money(fund)}৳\n💸 Total Withdraw: {money(wth)}৳\n\n🤖 Bot: {'🟢 ON' if getset('bot_enabled')=='1' else '🔴 OFF'}",
+            reply_markup=admin_kb(call.from_user.id)
+        )
+        await call.answer()
+    elif data == "x:controls":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f'🤖 Bot: {"🟢 ON" if getset("bot_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:bot_enabled")],
+            [InlineKeyboardButton(text=f'💰 Fund: {"🟢 ON" if getset("fund_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:fund_enabled")],
+            [InlineKeyboardButton(text=f'💸 Withdraw: {"🟢 ON" if getset("withdraw_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:withdraw_enabled")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
+        ])
+        await call.message.edit_text("⚙️ BOT / MASTER CONTROLS", reply_markup=kb)
+        await call.answer()
+    elif data.startswith("x:t:"):
+        key = data.split(":")[-1]
+        setset(key, "0" if getset(key) == "1" else "1")
+        await call.answer("Updated")
+        await x_controls_helper(call)
+    elif data == "x:pay":
+        await x_pay_helper(call)
+    elif data == "x:allw":
+        keys = ["wth_bkash_enabled", "wth_nagad_enabled", "wth_rocket_enabled", "wth_upay_enabled"]
+        new = "0" if all(getset(k) == "1" for k in keys) else "1"
+        for k in keys:
+            setset(k, new)
+        await x_pay_helper(call)
+    elif data.startswith("x:num:"):
+        await state.update_data(method=data.split(":")[-1])
+        await state.set_state(AdvancedAdminState.number)
+        await call.message.answer("📲 নতুন ১১ ডিজিটের নম্বর পাঠান।")
+        await call.answer()
+    elif data.startswith("x:gw:"):
+        await state.update_data(method=data.split(":")[-1])
+        await state.set_state(AdvancedAdminState.gateway_url)
+        await call.message.answer("🔗 Payment Gateway URL পাঠান (https://...)।")
+        await call.answer()
+    elif data.startswith("x:rm:"):
+        m = data.split(":")[-1]
+        setset("dep_bkash_gateway" if m == "bKash" else "dep_nagad_gateway", "")
+        await call.answer("Gateway removed", show_alert=True)
+        await x_pay_helper(call)
+    elif data == "x:limits":
+        await x_limits_helper(call)
+    elif data.startswith("x:v:"):
+        await state.update_data(key=data.split(":")[-1])
+        await state.set_state(AdvancedAdminState.generic_value)
+        await call.message.answer("✏️ নতুন সংখ্যাটি পাঠান।")
+        await call.answer()
+    elif data == "x:force":
+        await x_force_helper(call)
+    elif data == "x:tforce":
+        setset("force_join_enabled", "0" if getset("force_join_enabled") == "1" else "1")
+        await x_force_helper(call)
+    elif data == "x:fjset":
+        await state.set_state(AdvancedAdminState.force_chat)
+        await call.message.answer("📣 Channel username বা chat ID পাঠান। যেমন @NIKAN_EARN")
+        await call.answer()
+    elif data == "x:fjrm":
+        setset("force_join_enabled", "0")
+        setset("force_join_chat", "")
+        setset("force_join_link", "")
+        await x_force_helper(call)
+    elif data == "x:user":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔎 Search User by ID", callback_data="x:usearch")],
+            [InlineKeyboardButton(text="💎 Plan Add", callback_data="x:plan")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
+        ])
+        await call.message.edit_text("👤 USER CONTROL PANEL\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।", reply_markup=kb)
+        await call.answer()
+    elif data == "x:usearch":
+        await state.set_state(AdvancedAdminState.user_id)
+        await call.message.answer("🆔 User Telegram ID পাঠান।")
+        await call.answer()
+    elif data.startswith("x:ban:"):
+        _, _, uid, val = data.split(":")
+        uid, val = int(uid), int(val)
+        if uid == OWNER_ID:
+            return await call.answer("Owner cannot be banned.", show_alert=True)
+        con = db()
+        con.execute("UPDATE users SET banned=? WHERE user_id=?", (val, uid))
+        con.commit()
+        con.close()
+        await call.answer("Updated")
+        await call.message.answer(f"✅ Ban status: {'ON' if val else 'OFF'}")
+    elif data.startswith("x:sus:"):
+        _, _, uid, val = data.split(":")
+        uid, val = int(uid), int(val)
+        if uid == OWNER_ID:
+            return await call.answer("Owner cannot be suspended.", show_alert=True)
+        con = db()
+        con.execute("UPDATE users SET suspended=? WHERE user_id=?", (val, uid))
+        con.commit()
+        con.close()
+        await call.answer("Updated")
+        await call.message.answer(f"✅ Suspend status: {'ON' if val else 'OFF'}")
+    elif data.startswith("x:edit:"):
+        _, _, uid, field = data.split(":")
+        await state.update_data(uid=int(uid), field=field)
+        await state.set_state(AdvancedAdminState.user_value)
+        await call.message.answer(f"✏️ {field}\nনতুন absolute value পাঠান।")
+        await call.answer()
+    elif data.startswith("x:bmain:"):
+        uid = int(data.split(":")[-1])
+        await state.update_data(uid=uid, field="bonus_balance")
+        await state.set_state(AdvancedAdminState.user_value)
+        await call.message.answer("🎁 Bonus Balance থেকে কত টাকা Main Balance-এ transfer করবেন?")
+        await call.answer()
+    elif data == "x:plan":
+        await state.set_state(AdvancedAdminState.plan_uid)
+        await call.message.answer("🆔 User ID পাঠান।")
+        await call.answer()
+    elif data.startswith("x:padd:"):
+        _, _, uid, p = data.split(":")
+        uid = int(uid)
+        con = db()
+        cur = con.cursor()
+        cur.execute("INSERT INTO plans(user_id,plan,amount,activated_at,expires_at,active) VALUES(?,?,?,?,?,1)",
+                    (uid, p, PLANS[p], now_iso(), (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()))
+        con.commit()
+        con.close()
+        await state.clear()
+        await call.message.answer(f"✅ {p} added to {uid}.")
+        await call.answer("Added")
+    elif data == "x:ubroadcast":
+        await state.set_state(AdvancedAdminState.user_broadcast_id)
+        await call.message.answer("🆔 User ID পাঠান।")
+        await call.answer()
+    elif data == "x:broadcast":
+        await state.set_state(AdvancedAdminState.broadcast)
+        await call.message.answer("📢 Broadcast message লিখুন। তারপর Confirm/Cancel দেখানো হবে।")
+        await call.answer()
+    elif data == "x:bccancel":
+        await state.clear()
+        await call.message.edit_text("❌ Broadcast cancelled.")
+        await call.answer()
+    elif data == "x:bcok":
+        textmsg = (await state.get_data()).get("text", "")
+        await state.clear()
+        con = db()
+        ids = [r[0] for r in con.execute("SELECT user_id FROM users WHERE banned=0 AND suspended=0")]
+        con.close()
+        sent = fail = 0
+        for uid in ids:
+            try:
+                await bot.send_message(uid, textmsg)
+                sent += 1
+            except Exception:
+                fail += 1
+            await asyncio.sleep(0.04)
+        await call.message.edit_text(f"📢 Broadcast finished.\n✅ Sent: {sent}\n❌ Failed: {fail}")
+        await call.answer()
+    elif data == "x:deps":
+        con = db()
+        rows = con.execute("SELECT id,user_id,method,amount,txid,order_no,status FROM deposits WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
+        con.close()
+        if not rows:
+            return await call.message.answer("📥 No pending deposits.")
+        for did, uid, m, a, t, o, s in rows:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:dproc:{did}")],
+                [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:dok:{o}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:dno:{o}")]
+            ])
+            await call.message.answer(f"📥 #{did}\n👤 {uid}\n💳 {m}\n💰 {money(a)}৳\n📝 {t}\n🆔 {o}\n📌 {s}", reply_markup=kb)
+        await call.answer()
+    elif data.startswith("x:dproc:"):
+        did = int(data.split(":")[-1])
+        con = db()
+        con.execute("UPDATE deposits SET status='Processing',updated_at=? WHERE id=?", (now_iso(), did))
+        con.commit()
+        con.close()
+        await call.answer("Processing")
+    elif data.startswith("x:dok:"):
+        oid = data.split(":")[-1]
+        con = db()
+        cur = con.cursor()
+        r = cur.execute("SELECT id,user_id,method,amount,txid,status FROM deposits WHERE order_no=?", (oid,)).fetchone()
+        if not r:
+            con.close()
+            return await call.answer("Not found", show_alert=True)
+        did, uid, m, a, t, s = r
+        if s == "Approved":
+            con.close()
+            return await call.answer("Already approved", show_alert=True)
+        cur.execute("UPDATE deposits SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?", (now_iso(), did))
+        cur.execute("UPDATE users SET deposit_balance=deposit_balance+? WHERE user_id=?", (a, uid))
+        con.commit()
+        con.close()
+        await bot.send_message(
+            uid,
+            f"🎉 Deposit Successful!\nআপনার {m} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅\n━━━━━━━━━━━━━━━━━━\n💰 Deposit Amount: {money(a)} BDT\n📝 Transaction ID: {t}\n🆔 Order Number: {oid}\n━━━━━━━━━━━━━━━━━━\n💳 আপনার মূল ডিপোজিট ব্যালেন্সে {money(a)} BDT যোগ করা হয়েছে।\nধন্যবাদ। ❤️\n\nℹ️ Admin reason: Approved by admin"
+        )
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.answer("Approved")
+    elif data.startswith("x:dno:"):
+        oid = data.split(":")[-1]
+        await state.update_data(kind="deposit", rid=oid)
+        await state.set_state(AdvancedAdminState.reject_reason)
+        await call.message.answer("❌ Reject Reason লিখুন।")
+        await call.answer()
+    elif data == "x:wds":
+        con = db()
+        rows = con.execute("SELECT id,user_id,method,account,amount,status FROM withdrawals WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
+        con.close()
+        if not rows:
+            return await call.message.answer("📤 No pending withdrawals.")
+        for wid, uid, m, acc, a, s in rows:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:wproc:{wid}")],
+                [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:wok:{wid}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:wno:{wid}")]
+            ])
+            await call.message.answer(f"📤 #{wid}\n👤 {uid}\n💳 {m}\n📲 {acc}\n💰 {money(a)}৳\n📌 {s}", reply_markup=kb)
+        await call.answer()
+    elif data.startswith("x:wproc:"):
+        wid = int(data.split(":")[-1])
+        con = db()
+        con.execute("UPDATE withdrawals SET status='Processing',updated_at=? WHERE id=?", (now_iso(), wid))
+        con.commit()
+        con.close()
+        await call.answer("Processing")
+    elif data.startswith("x:wok:"):
+        wid = int(data.split(":")[-1])
+        con = db()
+        r = con.execute("SELECT user_id,method,account,amount,status FROM withdrawals WHERE id=?", (wid,)).fetchone()
+        if not r:
+            con.close()
+            return await call.answer("Not found", show_alert=True)
+        uid, m, acc, a, s = r
+        if s == "Approved":
+            con.close()
+            return await call.answer("Already approved", show_alert=True)
+        con.execute("UPDATE withdrawals SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?", (now_iso(), wid))
+        con.commit()
+        con.close()
+        await bot.send_message(
+            uid,
+            f"🎊 উইথড্র কনফার্মড!\n💰 পরিমাণ: {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে।\n📲 {m}: {acc}\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।"
+        )
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.answer("Approved")
+    elif data.startswith("x:wno:"):
+        wid = int(data.split(":")[-1])
+        await state.update_data(kind="withdraw", rid=wid)
+        await state.set_state(AdvancedAdminState.reject_reason)
+        await call.message.answer("❌ Withdraw Reject Reason লিখুন।")
+        await call.answer()
+    elif data == "x:admins":
+        if not super_ok(call.from_user.id):
+            await call.message.answer("শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!")
+            return await call.answer()
+        con = db()
+        rows = con.execute("SELECT user_id,role FROM admins ORDER BY user_id").fetchall()
+        con.close()
+        text = "👑 ADMIN MANAGEMENT\n━━━━━━━━━━━━━━━━━━\n" + ("\n".join(f"🆔 {u} — {r}" for u, r in rows) or "None")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add Admin", callback_data="x:addadmin"), InlineKeyboardButton(text="➖ Remove Admin", callback_data="x:rmadmin")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
+        ])
+        await call.message.edit_text(text, reply_markup=kb)
+        await call.answer()
+    elif data == "x:addadmin":
+        if not super_ok(call.from_user.id):
+            return await call.answer("Owner only", show_alert=True)
+        await state.set_state(AdvancedAdminState.add_admin)
+        await call.message.answer("➕ নতুন Admin-এর User Telegram ID পাঠান।")
+        await call.answer()
+    elif data == "x:rmadmin":
+        if not super_ok(call.from_user.id):
+            return await call.answer("Owner only", show_alert=True)
+        await state.set_state(AdvancedAdminState.remove_admin)
+        await call.message.answer("➖ Remove করতে চাওয়া Admin-এর User Telegram ID পাঠান।")
+        await call.answer()
 
-@dp.callback_query(F.data == "x:close")
-async def x_close(call: CallbackQuery):
-    await call.message.delete()
-    await call.answer()
-
-@dp.callback_query(F.data == "x:dash")
-async def x_dash(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    con = db()
-    cur = con.cursor()
-    users = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    vip = cur.execute("SELECT COUNT(DISTINCT user_id) FROM plans").fetchone()[0] if cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").fetchone() else 0
-    fund = cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE status IN ('Approved','Success')").fetchone()[0]
-    wth = cur.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status IN ('Approved','Success')").fetchone()[0]
-    con.close()
-    await call.message.edit_text(
-        f"📊 LIVE ADMIN DASHBOARD\n━━━━━━━━━━━━━━━━━━\n👥 Total Users: {users}\n💎 VIP Buyers: {vip}\n💰 Total Fund: {money(fund)}৳\n💸 Total Withdraw: {money(wth)}৳\n\n🤖 Bot: {'🟢 ON' if getset('bot_enabled')=='1' else '🔴 OFF'}",
-        reply_markup=admin_kb(call.from_user.id)
-    )
-    await call.answer()
-
-@dp.callback_query(F.data == "x:controls")
-async def x_controls(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
+async def x_controls_helper(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=a_toggle("🤖 Bot", "bot_enabled"), callback_data="x:t:bot_enabled")],
-        [InlineKeyboardButton(text=a_toggle("💰 Fund", "fund_enabled"), callback_data="x:t:fund_enabled")],
-        [InlineKeyboardButton(text=a_toggle("💸 Withdraw", "withdraw_enabled"), callback_data="x:t:withdraw_enabled")],
+        [InlineKeyboardButton(text=f'🤖 Bot: {"🟢 ON" if getset("bot_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:bot_enabled")],
+        [InlineKeyboardButton(text=f'💰 Fund: {"🟢 ON" if getset("fund_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:fund_enabled")],
+        [InlineKeyboardButton(text=f'💸 Withdraw: {"🟢 ON" if getset("withdraw_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:withdraw_enabled")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
     await call.message.edit_text("⚙️ BOT / MASTER CONTROLS", reply_markup=kb)
-    await call.answer()
 
-@dp.callback_query(F.data.startswith("x:t:"))
-async def x_toggle(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    key = call.data.split(":")[-1]
-    setset(key, "0" if getset(key) == "1" else "1")
-    await call.answer("Updated")
-    await x_controls(call)
-
-@dp.callback_query(F.data == "x:pay")
-async def x_pay(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
+async def x_pay_helper(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=a_toggle("Dep bKash", "dep_bkash_enabled"), callback_data="x:t:dep_bkash_enabled"), InlineKeyboardButton(text=a_toggle("Dep Nagad", "dep_nagad_enabled"), callback_data="x:t:dep_nagad_enabled")],
-        [InlineKeyboardButton(text=a_toggle("Wth bKash", "wth_bkash_enabled"), callback_data="x:t:wth_bkash_enabled"), InlineKeyboardButton(text=a_toggle("Wth Nagad", "wth_nagad_enabled"), callback_data="x:t:wth_nagad_enabled")],
-        [InlineKeyboardButton(text=a_toggle("Wth Rocket", "wth_rocket_enabled"), callback_data="x:t:wth_rocket_enabled"), InlineKeyboardButton(text=a_toggle("Wth Upay", "wth_upay_enabled"), callback_data="x:t:wth_upay_enabled")],
+        [InlineKeyboardButton(text=f'Dep bKash: {"🟢 ON" if getset("dep_bkash_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:dep_bkash_enabled"), InlineKeyboardButton(text=f'Dep Nagad: {"🟢 ON" if getset("dep_nagad_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:dep_nagad_enabled")],
+        [InlineKeyboardButton(text=f'Wth bKash: {"🟢 ON" if getset("wth_bkash_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_bkash_enabled"), InlineKeyboardButton(text=f'Wth Nagad: {"🟢 ON" if getset("wth_nagad_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_nagad_enabled")],
+        [InlineKeyboardButton(text=f'Wth Rocket: {"🟢 ON" if getset("wth_rocket_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_rocket_enabled"), InlineKeyboardButton(text=f'Wth Upay: {"🟢 ON" if getset("wth_upay_enabled")=="1" else "🔴 OFF"}', callback_data="x:t:wth_upay_enabled")],
         [InlineKeyboardButton(text="🔄 All Withdraw ON/OFF", callback_data="x:allw")],
         [InlineKeyboardButton(text="📲 Set bKash Number", callback_data="x:num:bKash"), InlineKeyboardButton(text="📲 Set Nagad Number", callback_data="x:num:Nagad")],
         [InlineKeyboardButton(text="🔗 Add/Edit bKash Gateway", callback_data="x:gw:bKash"), InlineKeyboardButton(text="🔗 Add/Edit Nagad Gateway", callback_data="x:gw:Nagad")],
@@ -1438,26 +1703,26 @@ async def x_pay(call: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
     ])
     await call.message.edit_text("💳 PAYMENT CONTROLS\n━━━━━━━━━━━━━━━━━━\nবিকাশ/নগদের Payment Gateway link এখান থেকেই Add/Edit/Remove করা যাবে।", reply_markup=kb)
-    await call.answer()
 
-@dp.callback_query(F.data == "x:allw")
-async def x_allw(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    keys = ["wth_bkash_enabled", "wth_nagad_enabled", "wth_rocket_enabled", "wth_upay_enabled"]
-    new = "0" if all(getset(k) == "1" for k in keys) else "1"
-    for k in keys:
-        setset(k, new)
-    await x_pay(call)
+async def x_limits_helper(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f'Min Dep {getset("min_dep")}৳', callback_data="x:v:min_dep"), InlineKeyboardButton(text=f'Max Dep {getset("max_dep")}৳', callback_data="x:v:max_dep")],
+        [InlineKeyboardButton(text=f'Min Wth {getset("min_wth")}৳', callback_data="x:v:min_wth"), InlineKeyboardButton(text=f'Max Wth {getset("max_wth")}৳', callback_data="x:v:max_wth")],
+        [InlineKeyboardButton(text=f'Daily Dep Limit {getset("daily_dep_limit")}', callback_data="x:v:daily_dep_limit")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
+    ])
+    await call.message.edit_text("📈 LIMIT & AMOUNT CONFIGURATION", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("x:num:"))
-async def x_num_prompt(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    await state.update_data(method=call.data.split(":")[-1])
-    await state.set_state(AdvancedAdminState.number)
-    await call.message.answer("📲 নতুন ১১ ডিজিটের নম্বর পাঠান।")
-    await call.answer()
+async def x_force_helper(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f'📣 Force Join: {"🟢 ON" if getset("force_join_enabled")=="1" else "🔴 OFF"}', callback_data="x:tforce")],
+        [InlineKeyboardButton(text="➕ Set Channel/Group", callback_data="x:fjset"), InlineKeyboardButton(text="🗑 Remove", callback_data="x:fjrm")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
+    ])
+    await call.message.edit_text(
+        f'📣 FORCE JOIN\nChat: {getset("force_join_chat") or "Not set"}\nLink: {getset("force_join_link") or "Not set"}',
+        reply_markup=kb
+    )
 
 @dp.message(AdvancedAdminState.number)
 async def x_num(message: Message, state: FSMContext):
@@ -1469,16 +1734,8 @@ async def x_num(message: Message, state: FSMContext):
     m = (await state.get_data())["method"]
     setset("bkash_number" if m == "bKash" else "nagad_number", n)
     await state.clear()
-    await message.answer(f"✅ {m} number updated: {n}", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data.startswith("x:gw:"))
-async def x_gw_prompt(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    await state.update_data(method=call.data.split(":")[-1])
-    await state.set_state(AdvancedAdminState.gateway_url)
-    await call.message.answer("🔗 Payment Gateway URL পাঠান (https://...)।")
-    await call.answer()
+    uid = message.from_user.id
+    await message.answer(f"✅ {m} number updated: {n}", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.gateway_url)
 async def x_gw(message: Message, state: FSMContext):
@@ -1490,38 +1747,8 @@ async def x_gw(message: Message, state: FSMContext):
     m = (await state.get_data())["method"]
     setset("dep_bkash_gateway" if m == "bKash" else "dep_nagad_gateway", url)
     await state.clear()
-    await message.answer(f"✅ {m} gateway saved.", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data.startswith("x:rm:"))
-async def x_rm_gw(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    m = call.data.split(":")[-1]
-    setset("dep_bkash_gateway" if m == "bKash" else "dep_nagad_gateway", "")
-    await call.answer("Gateway removed", show_alert=True)
-    await x_pay(call)
-
-@dp.callback_query(F.data == "x:limits")
-async def x_limits(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f'Min Dep {getset("min_dep")}৳', callback_data="x:v:min_dep"), InlineKeyboardButton(text=f'Max Dep {getset("max_dep")}৳', callback_data="x:v:max_dep")],
-        [InlineKeyboardButton(text=f'Min Wth {getset("min_wth")}৳', callback_data="x:v:min_wth"), InlineKeyboardButton(text=f'Max Wth {getset("max_wth")}৳', callback_data="x:v:max_wth")],
-        [InlineKeyboardButton(text=f'Daily Dep Limit {getset("daily_dep_limit")}', callback_data="x:v:daily_dep_limit")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
-    ])
-    await call.message.edit_text("📈 LIMIT & AMOUNT CONFIGURATION", reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("x:v:"))
-async def x_value_prompt(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    await state.update_data(key=call.data.split(":")[-1])
-    await state.set_state(AdvancedAdminState.generic_value)
-    await call.message.answer("✏️ নতুন সংখ্যাটি পাঠান।")
-    await call.answer()
+    uid = message.from_user.id
+    await message.answer(f"✅ {m} gateway saved.", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.generic_value)
 async def x_value(message: Message, state: FSMContext):
@@ -1535,44 +1762,21 @@ async def x_value(message: Message, state: FSMContext):
     k = (await state.get_data())["key"]
     setset(k, money(v))
     await state.clear()
-    await message.answer(f"✅ {k} = {money(v)} সেট হয়েছে।", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "x:force")
-async def x_force(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=a_toggle("📣 Force Join", "force_join_enabled"), callback_data="x:tforce")],
-        [InlineKeyboardButton(text="➕ Set Channel/Group", callback_data="x:fjset"), InlineKeyboardButton(text="🗑 Remove", callback_data="x:fjrm")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
-    ])
-    await call.message.edit_text(
-        f'📣 FORCE JOIN\nChat: {getset("force_join_chat") or "Not set"}\nLink: {getset("force_join_link") or "Not set"}',
-        reply_markup=kb
-    )
-    await call.answer()
-
-@dp.callback_query(F.data == "x:tforce")
-async def x_tforce(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    setset("force_join_enabled", "0" if getset("force_join_enabled") == "1" else "1")
-    await x_force(call)
-
-@dp.callback_query(F.data == "x:fjset")
-async def x_fjset(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdvancedAdminState.force_chat)
-    await call.message.answer("📣 Channel username বা chat ID পাঠান। যেমন @NIKAN_EARN")
-    await call.answer()
+    uid = message.from_user.id
+    await message.answer(f"✅ {k} = {money(v)} সেট হয়েছে।", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.force_chat)
 async def x_fjchat(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     await state.update_data(chat=message.text.strip())
     await state.set_state(AdvancedAdminState.force_link)
     await message.answer("🔗 Join link পাঠান।")
 
 @dp.message(AdvancedAdminState.force_link)
 async def x_fjlink(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     link = message.text.strip()
     if not re.match(r"^https?://", link):
         return await message.answer("❌ Valid URL দিন।")
@@ -1581,33 +1785,8 @@ async def x_fjlink(message: Message, state: FSMContext):
     setset("force_join_link", link)
     setset("force_join_enabled", "1")
     await state.clear()
-    await message.answer("✅ Force Join set ও ON হয়েছে।", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "x:fjrm")
-async def x_fjrm(call: CallbackQuery):
-    setset("force_join_enabled", "0")
-    setset("force_join_chat", "")
-    setset("force_join_link", "")
-    await x_force(call)
-
-@dp.callback_query(F.data == "x:user")
-async def x_user(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔎 Search User by ID", callback_data="x:usearch")],
-        [InlineKeyboardButton(text="💰 Edit Balances / Referral Count", callback_data="x:usearch")],
-        [InlineKeyboardButton(text="💎 Plan Add", callback_data="x:plan")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
-    ])
-    await call.message.edit_text("👤 USER CONTROL PANEL\n\nUser ID দিয়ে search করে balance, referral, ban/suspend ও plan control করুন।", reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query(F.data == "x:usearch")
-async def x_usearch(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdvancedAdminState.user_id)
-    await call.message.answer("🆔 User Telegram ID পাঠান।")
-    await call.answer()
+    uid = message.from_user.id
+    await message.answer("✅ Force Join set ও ON হয়েছে।", reply_markup=main_keyboard(uid))
 
 @dp.message(AdvancedAdminState.user_id)
 async def x_userid(message: Message, state: FSMContext):
@@ -1620,7 +1799,8 @@ async def x_userid(message: Message, state: FSMContext):
     r = user_row(uid)
     if not r:
         await state.clear()
-        return await message.answer("❌ User পাওয়া যায়নি।", reply_markup=main_keyboard())
+        uid_msg = message.from_user.id
+        return await message.answer("❌ User পাওয়া যায়নি।", reply_markup=main_keyboard(uid_msg))
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Ban", callback_data=f"x:ban:{uid}:1"), InlineKeyboardButton(text="✅ Unban", callback_data=f"x:ban:{uid}:0")],
@@ -1634,42 +1814,6 @@ async def x_userid(message: Message, state: FSMContext):
         f"👤 USER\n━━━━━━━━━━━━━━━━━━\n👤 {r[1]}\n🔗 @{r[2] or 'None'}\n🆔 {r[0]}\n💵 Main: {money(r[3])}৳\n📥 Deposit: {money(r[4])}৳\n🫂 Referral: {money(r[6])}৳\n🎁 Bonus: {money(r[5])}৳\n📝 Task: {money(r[9])}৳\n👥 Referrals: {r[10]}\n🚫 Ban: {'YES' if r[12] else 'NO'}\n⛔ Suspend: {'YES' if r[13] else 'NO'}",
         reply_markup=kb
     )
-
-@dp.callback_query(F.data.startswith("x:ban:"))
-async def x_ban(call: CallbackQuery):
-    _, _, uid, val = call.data.split(":")
-    uid, val = int(uid), int(val)
-    if uid == OWNER_ID:
-        return await call.answer("Owner cannot be banned.", show_alert=True)
-    con = db()
-    con.execute("UPDATE users SET banned=? WHERE user_id=?", (val, uid))
-    con.commit()
-    con.close()
-    await call.answer("Updated")
-    await call.message.answer(f"✅ Ban status: {'ON' if val else 'OFF'}")
-
-@dp.callback_query(F.data.startswith("x:sus:"))
-async def x_sus(call: CallbackQuery):
-    _, _, uid, val = call.data.split(":")
-    uid, val = int(uid), int(val)
-    if uid == OWNER_ID:
-        return await call.answer("Owner cannot be suspended.", show_alert=True)
-    con = db()
-    con.execute("UPDATE users SET suspended=? WHERE user_id=?", (val, uid))
-    con.commit()
-    con.close()
-    await call.answer("Updated")
-    await call.message.answer(f"✅ Suspend status: {'ON' if val else 'OFF'}")
-
-@dp.callback_query(F.data.startswith("x:edit:"))
-async def x_edit_prompt(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    _, _, uid, field = call.data.split(":")
-    await state.update_data(uid=int(uid), field=field)
-    await state.set_state(AdvancedAdminState.user_value)
-    await call.message.answer(f"✏️ {field}\nনতুন absolute value পাঠান।")
-    await call.answer()
 
 @dp.message(AdvancedAdminState.user_value)
 async def x_edit_value(message: Message, state: FSMContext):
@@ -1692,24 +1836,13 @@ async def x_edit_value(message: Message, state: FSMContext):
     con.commit()
     con.close()
     await state.clear()
-    await message.answer(f"✅ User {uid}: {field} = {money(v)}", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data.startswith("x:bmain:"))
-async def x_bmain_prompt(call: CallbackQuery, state: FSMContext):
-    uid = int(call.data.split(":")[-1])
-    await state.update_data(uid=uid, field="bonus_balance")
-    await state.set_state(AdvancedAdminState.user_value)
-    await call.message.answer("🎁 Bonus Balance থেকে কত টাকা Main Balance-এ transfer করবেন?")
-    await call.answer()
-
-@dp.callback_query(F.data == "x:plan")
-async def x_plan(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdvancedAdminState.plan_uid)
-    await call.message.answer("🆔 User ID পাঠান।")
-    await call.answer()
+    uid_msg = message.from_user.id
+    await message.answer(f"✅ User {uid}: {field} = {money(v)}", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.plan_uid)
 async def x_plan_uid(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     try:
         uid = int(message.text.strip())
     except ValueError:
@@ -1725,28 +1858,10 @@ async def x_plan_uid(message: Message, state: FSMContext):
     ])
     await message.answer("💎 Plan নির্বাচন করুন।", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("x:padd:"))
-async def x_plan_add(call: CallbackQuery, state: FSMContext):
-    _, _, uid, p = call.data.split(":")
-    uid = int(uid)
-    con = db()
-    cur = con.cursor()
-    cur.execute("INSERT INTO plans(user_id,plan,amount,activated_at,expires_at,active) VALUES(?,?,?,?,?,1)",
-                (uid, p, PLANS[p], now_iso(), (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()))
-    con.commit()
-    con.close()
-    await state.clear()
-    await call.message.answer(f"✅ {p} added to {uid}.")
-    await call.answer("Added")
-
-@dp.callback_query(F.data == "x:ubroadcast")
-async def x_ubroadcast(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdvancedAdminState.user_broadcast_id)
-    await call.message.answer("🆔 User ID পাঠান।")
-    await call.answer()
-
 @dp.message(AdvancedAdminState.user_broadcast_id)
 async def x_ubid(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     try:
         uid = int(message.text.strip())
     except ValueError:
@@ -1759,6 +1874,8 @@ async def x_ubid(message: Message, state: FSMContext):
 
 @dp.message(AdvancedAdminState.user_broadcast_text)
 async def x_ubtext(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     d = await state.get_data()
     uid = d["uid"]
     try:
@@ -1767,16 +1884,13 @@ async def x_ubtext(message: Message, state: FSMContext):
     except Exception as e:
         out = f"❌ পাঠানো যায়নি: {type(e).__name__}"
     await state.clear()
-    await message.answer(out, reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "x:broadcast")
-async def x_broadcast(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdvancedAdminState.broadcast)
-    await call.message.answer("📢 Broadcast message লিখুন। তারপর Confirm/Cancel দেখানো হবে।")
-    await call.answer()
+    uid_msg = message.from_user.id
+    await message.answer(out, reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.broadcast)
 async def x_bc_preview(message: Message, state: FSMContext):
+    if not admin_ok(message.from_user.id):
+        return
     await state.update_data(text=message.text or "")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Confirm", callback_data="x:bcok"),
@@ -1786,156 +1900,6 @@ async def x_bc_preview(message: Message, state: FSMContext):
         "📢 BROADCAST PREVIEW\n━━━━━━━━━━━━━━━━━━\n" + (message.text or "") + "\n━━━━━━━━━━━━━━━━━━\nসকল user-কে পাঠাবেন?",
         reply_markup=kb
     )
-
-@dp.callback_query(F.data == "x:bccancel")
-async def x_bccancel(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("❌ Broadcast cancelled.")
-    await call.answer()
-
-@dp.callback_query(F.data == "x:bcok")
-async def x_bcok(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    textmsg = (await state.get_data()).get("text", "")
-    await state.clear()
-    con = db()
-    ids = [r[0] for r in con.execute("SELECT user_id FROM users WHERE banned=0 AND suspended=0")]
-    con.close()
-    sent = fail = 0
-    for uid in ids:
-        try:
-            await bot.send_message(uid, textmsg)
-            sent += 1
-        except Exception:
-            fail += 1
-        await asyncio.sleep(0.04)
-    await call.message.edit_text(f"📢 Broadcast finished.\n✅ Sent: {sent}\n❌ Failed: {fail}")
-    await call.answer()
-
-@dp.callback_query(F.data == "x:deps")
-async def x_deps(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    con = db()
-    rows = con.execute("SELECT id,user_id,method,amount,txid,order_no,status FROM deposits WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
-    con.close()
-    if not rows:
-        return await call.message.answer("📥 No pending deposits.")
-    for did, uid, m, a, t, o, s in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:dproc:{did}")],
-            [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:dok:{o}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:dno:{o}")]
-        ])
-        await call.message.answer(f"📥 #{did}\n👤 {uid}\n💳 {m}\n💰 {money(a)}৳\n📝 {t}\n🆔 {o}\n📌 {s}", reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("x:dproc:"))
-async def x_dproc(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return
-    did = int(call.data.split(":")[-1])
-    con = db()
-    con.execute("UPDATE deposits SET status='Processing',updated_at=? WHERE id=?", (now_iso(), did))
-    con.commit()
-    con.close()
-    await call.answer("Processing")
-
-@dp.callback_query(F.data.startswith("x:dok:"))
-async def x_dok(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    oid = call.data.split(":")[-1]
-    con = db()
-    cur = con.cursor()
-    r = cur.execute("SELECT id,user_id,method,amount,txid,status FROM deposits WHERE order_no=?", (oid,)).fetchone()
-    if not r:
-        con.close()
-        return await call.answer("Not found", show_alert=True)
-    did, uid, m, a, t, s = r
-    if s == "Approved":
-        con.close()
-        return await call.answer("Already approved", show_alert=True)
-    cur.execute("UPDATE deposits SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?", (now_iso(), did))
-    cur.execute("UPDATE users SET deposit_balance=deposit_balance+? WHERE user_id=?", (a, uid))
-    con.commit()
-    con.close()
-    await bot.send_message(
-        uid,
-        f"🎉 Deposit Successful!\nআপনার {m} Deposit সফলভাবে সম্পন্ন হয়েছে। ✅\n━━━━━━━━━━━━━━━━━━\n💰 Deposit Amount: {money(a)} BDT\n📝 Transaction ID: {t}\n🆔 Order Number: {oid}\n━━━━━━━━━━━━━━━━━━\n💳 আপনার মূল ডিপোজিট ব্যালেন্সে {money(a)} BDT যোগ করা হয়েছে।\nধন্যবাদ। ❤️\n\nℹ️ Admin reason: Approved by admin"
-    )
-    await call.message.edit_reply_markup(reply_markup=None)
-    await call.answer("Approved")
-
-@dp.callback_query(F.data.startswith("x:dno:"))
-async def x_dno(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    oid = call.data.split(":")[-1]
-    await state.update_data(kind="deposit", rid=oid)
-    await state.set_state(AdvancedAdminState.reject_reason)
-    await call.message.answer("❌ Reject Reason লিখুন।")
-    await call.answer()
-
-@dp.callback_query(F.data == "x:wds")
-async def x_wds(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    con = db()
-    rows = con.execute("SELECT id,user_id,method,account,amount,status FROM withdrawals WHERE status IN ('Pending','Processing') ORDER BY id DESC LIMIT 10").fetchall()
-    con.close()
-    if not rows:
-        return await call.message.answer("📤 No pending withdrawals.")
-    for wid, uid, m, acc, a, s in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚙️ Processing", callback_data=f"x:wproc:{wid}")],
-            [InlineKeyboardButton(text="✅ Approve", callback_data=f"x:wok:{wid}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"x:wno:{wid}")]
-        ])
-        await call.message.answer(f"📤 #{wid}\n👤 {uid}\n💳 {m}\n📲 {acc}\n💰 {money(a)}৳\n📌 {s}", reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("x:wproc:"))
-async def x_wproc(call: CallbackQuery):
-    wid = int(call.data.split(":")[-1])
-    con = db()
-    con.execute("UPDATE withdrawals SET status='Processing',updated_at=? WHERE id=?", (now_iso(), wid))
-    con.commit()
-    con.close()
-    await call.answer("Processing")
-
-@dp.callback_query(F.data.startswith("x:wok:"))
-async def x_wok(call: CallbackQuery):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    wid = int(call.data.split(":")[-1])
-    con = db()
-    r = con.execute("SELECT user_id,method,account,amount,status FROM withdrawals WHERE id=?", (wid,)).fetchone()
-    if not r:
-        con.close()
-        return await call.answer("Not found", show_alert=True)
-    uid, m, acc, a, s = r
-    if s == "Approved":
-        con.close()
-        return await call.answer("Already approved", show_alert=True)
-    con.execute("UPDATE withdrawals SET status='Approved',reason='Approved by admin',updated_at=? WHERE id=?", (now_iso(), wid))
-    con.commit()
-    con.close()
-    await bot.send_message(
-        uid,
-        f"🎊 উইথড্র কনফার্মড!\n💰 পরিমাণ: {money(a)}৳\n🟢 আপনার পেমেন্ট রিকোয়েস্ট অনুমোদিত হয়েছে।\n📲 {m}: {acc}\n\nℹ️ Admin reason: Approved by admin\nℹ️ DEMO mode-এ কোনো বাস্তব পেমেন্ট পাঠানো হয় না।"
-    )
-    await call.message.edit_reply_markup(reply_markup=None)
-    await call.answer("Approved")
-
-@dp.callback_query(F.data.startswith("x:wno:"))
-async def x_wno(call: CallbackQuery, state: FSMContext):
-    if not admin_ok(call.from_user.id):
-        return await call.answer("Admin only", show_alert=True)
-    wid = int(call.data.split(":")[-1])
-    await state.update_data(kind="withdraw", rid=wid)
-    await state.set_state(AdvancedAdminState.reject_reason)
-    await call.message.answer("❌ Withdraw Reject Reason লিখুন।")
-    await call.answer()
 
 @dp.message(AdvancedAdminState.reject_reason)
 async def x_reject_reason(message: Message, state: FSMContext):
@@ -1975,31 +1939,8 @@ async def x_reject_reason(message: Message, state: FSMContext):
     con.commit()
     con.close()
     await state.clear()
-    await message.answer("✅ Status updated এবং user notification পাঠানো হয়েছে।", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "x:admins")
-async def x_admins(call: CallbackQuery):
-    if not super_ok(call.from_user.id):
-        await call.message.answer("শুধুমাত্র সুপার এডমিন এটি দেখতে পারবে!")
-        return await call.answer()
-    con = db()
-    rows = con.execute("SELECT user_id,role FROM admins ORDER BY user_id").fetchall()
-    con.close()
-    text = "👑 ADMIN MANAGEMENT\n━━━━━━━━━━━━━━━━━━\n" + ("\n".join(f"🆔 {u} — {r}" for u, r in rows) or "None")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add Admin", callback_data="x:addadmin"), InlineKeyboardButton(text="➖ Remove Admin", callback_data="x:rmadmin")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="x:open")]
-    ])
-    await call.message.edit_text(text, reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query(F.data == "x:addadmin")
-async def x_addadmin(call: CallbackQuery, state: FSMContext):
-    if not super_ok(call.from_user.id):
-        return await call.answer("Owner only", show_alert=True)
-    await state.set_state(AdvancedAdminState.add_admin)
-    await call.message.answer("➕ নতুন Admin-এর User Telegram ID পাঠান।")
-    await call.answer()
+    uid_msg = message.from_user.id
+    await message.answer("✅ Status updated এবং user notification পাঠানো হয়েছে।", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.add_admin)
 async def x_do_addadmin(message: Message, state: FSMContext):
@@ -2014,15 +1955,8 @@ async def x_do_addadmin(message: Message, state: FSMContext):
     con.commit()
     con.close()
     await state.clear()
-    await message.answer(f"✅ User {uid} now Admin.", reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "x:rmadmin")
-async def x_rmadmin(call: CallbackQuery, state: FSMContext):
-    if not super_ok(call.from_user.id):
-        return await call.answer("Owner only", show_io_alert=True) if hasattr(call, 'answer') else None
-    await state.set_state(AdvancedAdminState.remove_admin)
-    await call.message.answer("➖ Remove করতে চাওয়া Admin-এর User Telegram ID পাঠান।")
-    await call.answer()
+    uid_msg = message.from_user.id
+    await message.answer(f"✅ User {uid} now Admin.", reply_markup=main_keyboard(uid_msg))
 
 @dp.message(AdvancedAdminState.remove_admin)
 async def x_do_rmadmin(message: Message, state: FSMContext):
@@ -2039,7 +1973,15 @@ async def x_do_rmadmin(message: Message, state: FSMContext):
     con.commit()
     con.close()
     await state.clear()
-    await message.answer(f"✅ Admin {uid} removed.", reply_markup=main_keyboard())
+    uid_msg = message.from_user.id
+    await message.answer(f"✅ Admin {uid} removed.", reply_markup=main_keyboard(uid_msg))
+
+# Fallback security handler for manual text "🔧 Admin Panel" input by unauthorized users
+@dp.message(F.text == "🔧 Admin Panel")
+async def unauthorized_admin_panel_text(message: Message):
+    if not admin_ok(message.from_user.id):
+        await message.answer("❌ আপনার Admin access নেই।")
+        return
 
 # =========================
 # MAIN ENTRY POINT
