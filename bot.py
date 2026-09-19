@@ -23,7 +23,7 @@ BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"  # আপনার 
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
-PAYMENT_GATEWAY_URL = "https://example.com/payment-gateway"
+PAYMENT_GATEWAY_URL = "https://ttkpay.up.railway.app"
 BINANCE_DEPOSIT_ADDRESS = "0xade76b7f023c3ded14850293ea26e477edbdd048"
 USDT_RATE_BDT = Decimal("125")
 
@@ -386,14 +386,18 @@ async def dep_local_amount(message: Message, state: FSMContext):
 
     data = await state.get_data()
     method = data.get("method")
+    user_id = message.from_user.id
+
+    # ডায়নামিক পেমেন্ট গেটওয়ে লিংক যেখানে অ্যামাউন্ট এবং ইউজার আইডি পাস করা হয়েছে
+    payment_url = f"{PAYMENT_GATEWAY_URL}/?amount={amount}&user_id={user_id}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=PAYMENT_GATEWAY_URL)],
+        [InlineKeyboardButton(text="💳 পেমেন্ট গেটওয়েতে যান", url=payment_url)],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_inline")]
     ])
     await message.answer(
         f"💰 ডিপোজিট এমাউন্ট: {money(amount)}৳\n\n"
-        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন。\n\n"
+        "আপনার প্রদত্ত এমাউন্টটি ডিপোজিট করতে নিচের দেওয়া লিংকে প্রবেশ করুন।\n\n"
         f"💳 Method: {method}",
         reply_markup=kb
     )
@@ -1932,7 +1936,7 @@ async def x_reject_reason(message: Message, state: FSMContext):
             cur.execute("UPDATE users SET main_balance=main_balance+? WHERE user_id=?", (a, uid))
         await bot.send_message(
             uid,
-            f"🚫 WITHDRAW CANCELLED\n💰 Amount: {money(a)}৳\nআপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে।\n↩️ {money(a)}৳ আপনার অ্যাকাউন্ট ব্যালেন্সে পুনরায় যোগ হয়েছে।\n\n❗ Reject Reason: {reason}"
+            f"🚫 WITHDRAW CANCELLED\n💰 Amount: {money(a)}৳\nআপনার উইথড্র রিকোয়েস্টটি বাতিল করা হয়েছে।\n↩️ {money(a)}৳ আপনার অ্যাকাউন্ট ব্যালেন্সে পুনরায় যোগ হয়েছে।\n\n❗ Reject Reason: {reason}"
         )
     con.commit()
     con.close()
