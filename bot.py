@@ -41,7 +41,9 @@ PLANS = {
 PLAN_DAYS = 4
 DEMO_DAILY_RATE = Decimal("0.34")
 
-bot = Bot(BOT_TOKEN, default=dict(parse_mode=ParseMode.HTML))
+from aiogram.client.default import DefaultBotSettings
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotSettings(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 PROCESSED_CALLBACKS = {}
