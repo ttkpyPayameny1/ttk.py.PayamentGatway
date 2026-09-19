@@ -20,7 +20,7 @@ from aiogram.enums import ParseMode
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAFn53mUa_zEqa3taCfD37grYC02MkyFBHA"
+BOT_TOKEN = "8983512458:AAEVjaP5zsL25XdPZCbas3Ma6iDXWVdHnRE"
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
