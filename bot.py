@@ -20,7 +20,8 @@ from aiogram.enums import ParseMode
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = "8983512458:AAF6unLIjWovwGPOaxij3Ne0etJxV8koQj8"
+# TODO: Replace with your valid token from @BotFather
+BOT_TOKEN = "8983512458:AAEVjaP5zsL25XdPZCbas3Ma6iDXWVdHnRE"
 ADMIN_ID = 2037461288
 OWNER_ID = ADMIN_ID
 
@@ -41,12 +42,8 @@ PLANS = {
 PLAN_DAYS = 4
 DEMO_DAILY_RATE = Decimal("0.34")
 
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
-
-# এভাবে শুধু টোকেন দিয়ে বট ইনিশিয়ালাইজ করুন
+# Initialize Bot and Dispatcher cleanly
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 dp = Dispatcher()
 
 PROCESSED_CALLBACKS = {}
